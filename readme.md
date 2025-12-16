@@ -12,13 +12,14 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o ai_box main.go
 
 #2.docker编译
 docker run --rm \
+    --platform linux/arm64 \
     -v "$PWD":/app \
     -w /app \
     -e CGO_ENABLED=1 \
     -e GOOS=linux \
     -e GOARCH=arm64 \
     golang:1.23 \
-    sh -c "apt-get update && apt-get install -y gcc-aarch64-linux-gnu && CC=aarch64-linux-gnu-gcc go build -o ai_box main.go"
+    sh -c "apt-get update && apt-get install -y build-essential && go mod tidy && go build -v -o ai_box ."
 
 
 #3.docker编译完之后检查文件最新生成时间
