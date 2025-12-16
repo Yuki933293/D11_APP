@@ -18,7 +18,7 @@ docker run --rm \
     -e GOOS=linux \
     -e GOARCH=arm64 \
     golang:1.23 \
-    sh -c "go build -o ai_box main.go"
+    sh -c "apt-get update && apt-get install -y gcc-aarch64-linux-gnu && CC=aarch64-linux-gnu-gcc go build -o ai_box main.go"
 
 
 #3.docker编译完之后检查文件最新生成时间

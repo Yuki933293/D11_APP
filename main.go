@@ -20,8 +20,11 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	// ★★★ 引入 WebRTC VAD 库 ★★★
+	vado "github.com/maxhawkins/go-webrtc-vad"
+
 	"ai_box/aec"
-	"ai_box/vad"
+	// "ai_box/vad" // 移除旧的简陋 VAD
 )
 
 // ================= 配置区 =================
@@ -46,9 +49,7 @@ var (
 	stateMutex     sync.Mutex
 	stopPlayChan   chan struct{}
 	insecureClient *http.Client
-
-	// 新增：全局退出标志，防止“诈尸”
-	isExiting bool
+	isExiting      bool
 )
 
 func init() {
@@ -57,12 +58,18 @@ func init() {
 }
 
 func main() {
-	// 设置日志包含微秒，方便排查延迟
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
-	log.Println("=== RK3308 AI 助手 (V17.0 性能分析与逻辑修复版) ===")
+	log.Println("=== RK3308 AI 助手 (V18.0 WebRTC VAD 适配版) ===")
 
 	aecProc := aec.NewProcessor()
-	vadEng := vad.NewEngine()
+
+	// ★★★ 1. 初始化 WebRTC VAD ★★★
+	vadEng, err := vado.New()
+	if err != nil {
+		log.Fatalf("VAD Init 失败 (请检查 libs 引用): %v", err)
+	}
+	vadEng.SetMode(2) // 模式 2 (Aggressive)，适合嘈杂环境，如果太不灵敏可改回 1
+
 	stopPlayChan = make(chan struct{})
 
 	// 启动核心循环
@@ -71,14 +78,16 @@ func main() {
 	select {}
 }
 
-// 辅助函数：计算耗时
 func logCost(stage string, start time.Time) {
 	duration := time.Since(start)
 	log.Printf("⏱️ [%s] 耗时: %d ms", stage, duration.Milliseconds())
 }
 
-func audioLoop(aecProc *aec.Processor, vadEng *vad.Engine) {
-	cmd := exec.Command("arecord", "-D", "hw:2,0", "-c", "10", "-r", "16000", "-f", "S16_LE", "-t", "raw")
+// 核心音频循环：录音 -> AEC -> 缓冲适配 -> VAD
+func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
+	// 启动录音
+	// period-size=256 是硬件 buffer 大小，决定了每次 read 的数据量
+	cmd := exec.Command("arecord", "-D", "hw:2,0", "-c", "10", "-r", "16000", "-f", "S16_LE", "-t", "raw", "--period-size=256", "--buffer-size=16384")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		log.Fatalf("无法获取录音管道: %v", err)
@@ -86,20 +95,25 @@ func audioLoop(aecProc *aec.Processor, vadEng *vad.Engine) {
 	if err := cmd.Start(); err != nil {
 		log.Fatalf("无法启动录音: %v", err)
 	}
-	log.Println("🎤 麦克风已开启...")
+	log.Println("🎤 麦克风已开启 (WebRTC VAD 监听中)...")
 
-	frameSize := 256
-	channels := 10
-	frameBytes := frameSize * channels * 2
-	readBuf := make([]byte, frameBytes)
+	// 硬件帧参数
+	const HARDWARE_FRAME_SIZE = 256
+	readChunkSize := HARDWARE_FRAME_SIZE * 10 * 2 // 10通道 * 2bytes
+	readBuf := make([]byte, readChunkSize)
+
+	// ★★★ 2. VAD 适配参数 ★★★
+	// WebRTC 强制要求 20ms = 320 samples
+	const VAD_FRAME_SAMPLES = 320
+	// 蓄水池：用于暂存 AEC 处理后的数据
+	vadAccumulator := make([]int16, 0, 1024)
+	// 临时字节 buffer，用于传给 VAD
+	vadByteBuf := make([]byte, VAD_FRAME_SAMPLES*2)
+
 	var asrBuffer []int16
-
-	// VAD 参数
 	vadSilenceCounter := 0
 	vadSpeechCounter := 0
 	isSpeechTriggered := false
-
-	// 延迟调试：记录用户何时停止说话
 	var silenceStartTime time.Time
 
 	for {
@@ -108,91 +122,109 @@ func audioLoop(aecProc *aec.Processor, vadEng *vad.Engine) {
 			continue
 		}
 
+		// 1. 读取硬件数据 (256 samples)
 		_, err := io.ReadFull(stdout, readBuf)
 		if err != nil {
+			log.Printf("录音管道断开: %v", err)
 			break
 		}
 
-		rawInt16 := make([]int16, frameSize*channels)
+		// 解析 10 通道
+		rawInt16 := make([]int16, HARDWARE_FRAME_SIZE*10)
 		for i := 0; i < len(rawInt16); i++ {
 			rawInt16[i] = int16(binary.LittleEndian.Uint16(readBuf[i*2 : i*2+2]))
 		}
 
-		// AEC 耗时极短，一般忽略，但为了严谨也可以打点
-		cleanAudio, _ := aecProc.Process(rawInt16)
-		if cleanAudio == nil {
+		// 2. AEC 处理 (输入10通道 -> 输出1通道, 长度 256)
+		cleanAudioChunk, _ := aecProc.Process(rawInt16)
+		if cleanAudioChunk == nil {
 			continue
 		}
 
-		isSpeech := vadEng.IsSpeech(cleanAudio)
+		// ★★★ 3. 存入蓄水池 (解决 256 vs 320 冲突) ★★★
+		vadAccumulator = append(vadAccumulator, cleanAudioChunk...)
 
-		stateMutex.Lock()
-		curr := currentState
-		stateMutex.Unlock()
+		// ★★★ 4. 循环切出 320 点的标准帧喂给 VAD ★★★
+		for len(vadAccumulator) >= VAD_FRAME_SAMPLES {
+			// 切出 20ms
+			currentFrame := vadAccumulator[:VAD_FRAME_SAMPLES]
+			vadAccumulator = vadAccumulator[VAD_FRAME_SAMPLES:]
 
-		if isSpeech {
-			vadSpeechCounter++
-			vadSilenceCounter = 0
-			// 每次检测到有人说话，重置静音计时
-			silenceStartTime = time.Time{}
-		} else {
-			vadSilenceCounter++
-			vadSpeechCounter = 0
-			// 刚开始静音时记录时间
-			if vadSilenceCounter == 1 {
-				silenceStartTime = time.Now()
+			// 转成 byte 数组 (Little Endian)
+			for i, v := range currentFrame {
+				binary.LittleEndian.PutUint16(vadByteBuf[i*2:], uint16(v))
 			}
-		}
 
-		// === 打断逻辑 ===
-		if vadSpeechCounter > 5 {
-			if curr == STATE_SPEAKING {
-				log.Println("🛑 [Barge-in] 检测到打断！执行 Kill...")
-				select {
-				case stopPlayChan <- struct{}{}:
-				default:
+			// 5. 调用 WebRTC VAD
+			isSpeech, err := vadEng.Process(16000, vadByteBuf)
+			if err != nil {
+				// 忽略初始化错误的帧
+				continue
+			}
+
+			// 6. 状态机逻辑 (此处逻辑与 V17 基本一致，只是步进单位变成了 20ms)
+			stateMutex.Lock()
+			curr := currentState
+			stateMutex.Unlock()
+
+			if isSpeech {
+				vadSpeechCounter++
+				vadSilenceCounter = 0
+				silenceStartTime = time.Time{}
+			} else {
+				vadSilenceCounter++
+				vadSpeechCounter = 0
+				if vadSilenceCounter == 1 {
+					silenceStartTime = time.Now()
 				}
-				setState(STATE_LISTENING)
-				asrBuffer = []int16{}
-				isSpeechTriggered = true
 			}
 
-			if curr == STATE_LISTENING {
-				if !isSpeechTriggered {
-					log.Println("👂 [VAD] 检测到人声开始...")
+			// === 打断逻辑 (Barge-in) ===
+			// 15帧 * 20ms = 300ms 连续人声触发打断
+			if vadSpeechCounter > 15 {
+				if curr == STATE_SPEAKING {
+					log.Println("🛑 [Barge-in] 检测到打断！")
+					select {
+					case stopPlayChan <- struct{}{}:
+					default:
+					}
+					setState(STATE_LISTENING)
+					asrBuffer = []int16{}
+					isSpeechTriggered = true
+				}
+				if curr == STATE_LISTENING && !isSpeechTriggered {
+					log.Println("👂 [VAD] 检测到说话开始...")
 					isSpeechTriggered = true
 				}
 			}
-		}
 
-		// === 收集音频与发送 ===
-		if curr == STATE_LISTENING {
-			if isSpeechTriggered {
-				asrBuffer = append(asrBuffer, cleanAudio...)
+			// === 收集音频 ===
+			if curr == STATE_LISTENING {
+				if isSpeechTriggered {
+					asrBuffer = append(asrBuffer, currentFrame...)
 
-				// 判停逻辑：800ms 静音 (50帧)
-				if vadSilenceCounter > 50 && len(asrBuffer) > 16000*1 {
-					// 计算 VAD 等待带来的延迟
-					vadWaitDuration := time.Since(silenceStartTime)
-					log.Printf("⚡ [VAD] 说话结束 (VAD等待确认耗时: %d ms), 开始处理...", vadWaitDuration.Milliseconds())
+					// 判停：40帧 * 20ms = 800ms 静音
+					if vadSilenceCounter > 40 && len(asrBuffer) > 16000*0.5 {
+						vadWaitDuration := time.Since(silenceStartTime)
+						log.Printf("⚡ [VAD] 说话结束 (静音等待: %d ms), 开始处理...", vadWaitDuration.Milliseconds())
 
-					bufferCopy := make([]int16, len(asrBuffer))
-					copy(bufferCopy, asrBuffer)
+						bufferCopy := make([]int16, len(asrBuffer))
+						copy(bufferCopy, asrBuffer)
 
-					// 异步处理，不阻塞录音
-					go processASR(bufferCopy)
+						go processASR(bufferCopy)
 
-					asrBuffer = []int16{}
-					isSpeechTriggered = false
-					vadSilenceCounter = 0
-				}
-			} else {
-				// 预读缓冲 500ms
-				if len(asrBuffer) > 16000/2 {
-					asrBuffer = asrBuffer[256:]
-					asrBuffer = append(asrBuffer, cleanAudio...)
+						asrBuffer = []int16{}
+						isSpeechTriggered = false
+						vadSilenceCounter = 0
+					}
 				} else {
-					asrBuffer = append(asrBuffer, cleanAudio...)
+					// 预读缓冲 (保持 500ms)
+					if len(asrBuffer) > 16000/2 {
+						asrBuffer = asrBuffer[VAD_FRAME_SAMPLES:]
+						asrBuffer = append(asrBuffer, currentFrame...)
+					} else {
+						asrBuffer = append(asrBuffer, currentFrame...)
+					}
 				}
 			}
 		}
@@ -205,11 +237,9 @@ func setState(s AppState) {
 	currentState = s
 }
 
-// ================= 核心业务流程 (含埋点) =================
+// ================= 核心业务流程 (保留 V17 逻辑) =================
 func processASR(pcmDataInt16 []int16) {
-	// 全流程计时起点
 	pipelineStart := time.Now()
-
 	setState(STATE_THINKING)
 
 	pcmBytes := make([]byte, len(pcmDataInt16)*2)
@@ -217,7 +247,7 @@ func processASR(pcmDataInt16 []int16) {
 		binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(v))
 	}
 
-	// 1. ASR 阶段
+	// 1. ASR
 	asrStart := time.Now()
 	log.Println("🚀 [ASR] 开始请求云端识别...")
 	text := callASRWebSocket(pcmBytes)
@@ -230,27 +260,19 @@ func processASR(pcmDataInt16 []int16) {
 	}
 	log.Printf("✅ [ASR结果] 用户说: [%s]", text)
 
-	// === 修复“诈尸”BUG：在这里拦截控制指令 ===
-	// 在请求 Agent 之前，先看是不是要关闭
+	// 指令拦截
 	if strings.Contains(text, "关闭") || strings.Contains(text, "再见") || strings.Contains(text, "退下") {
-		log.Println("🛑 [指令] 检测到退出指令，系统即将关闭...")
-		isExiting = true // 锁死状态，防止 audioLoop 继续收音
-
-		// 播放最后的告别 (不走 Agent，直接 TTS)
-		finalReply := "好的，正在关闭系统，再见。"
-
-		setState(STATE_SPEAKING) // 此时虽然 Exiting，但为了播放还是切一下状态
+		log.Println("🛑 [指令] 退出系统")
+		isExiting = true
+		finalReply := "好的，再见。"
+		setState(STATE_SPEAKING)
 		speakQwenFlash(finalReply)
-
-		// 等待播放完 (简单 Sleep，或者优化为等待播放结束信号)
-		time.Sleep(4 * time.Second)
-
-		log.Println("👋 [系统] 进程退出")
+		time.Sleep(3 * time.Second)
 		os.Exit(0)
 		return
 	}
 
-	// 2. Agent 阶段 (LLM)
+	// 2. Agent (使用 V17 的逻辑)
 	agentStart := time.Now()
 	log.Println("🧠 [Agent] 请求 LLM 思考中...")
 	reply := callAgent(text)
@@ -258,22 +280,19 @@ func processASR(pcmDataInt16 []int16) {
 
 	log.Printf("🤖 [Agent回复] %s", reply)
 
-	// 如果在思考期间，用户又打断说“关闭”了，这里再次检查
 	if isExiting {
 		return
 	}
 
-	// 3. TTS 阶段
+	// 3. TTS
 	ttsStart := time.Now()
 	setState(STATE_SPEAKING)
 	log.Println("🔊 [TTS] 开始生成并播放...")
 	speakQwenFlash(reply)
 	logCost("TTS播放全流程", ttsStart)
 
-	// 4. 结束，统计总耗时
 	logCost("===== 对话全链路总耗时 =====", pipelineStart)
 
-	// 恢复聆听
 	stateMutex.Lock()
 	if currentState == STATE_SPEAKING && !isExiting {
 		currentState = STATE_LISTENING
@@ -281,11 +300,8 @@ func processASR(pcmDataInt16 []int16) {
 	stateMutex.Unlock()
 }
 
-// ---------------- TTS (支持打断) ----------------
+// ---------------- TTS (保持 V17) ----------------
 func speakQwenFlash(text string) {
-	// 下载与播放...
-	// 注意：这里为了测算首包延迟，我们在收到第一个数据包时打个日志
-
 	payload := map[string]interface{}{
 		"model":      "qwen3-tts-flash-2025-11-27",
 		"input":      map[string]interface{}{"text": text, "voice": "Cherry", "language_type": "Chinese"},
@@ -310,10 +326,6 @@ func speakQwenFlash(text string) {
 		return
 	}
 	defer outFile.Close()
-
-	// 启动播放进程 (流式追加写入，这里先启动 aplay 监听文件流可能更复杂，
-	// 简单起见我们这里还是下载完再播，或者一边写一边播。
-	// 为了排查延迟，我们先记录“收到第一个包”的时间)
 
 	firstByteReceived := false
 	scanner := bufio.NewScanner(resp.Body)
@@ -347,7 +359,6 @@ func speakQwenFlash(text string) {
 		}
 	}
 
-	// 播放
 	playCmd := exec.Command("aplay", "-D", "plughw:1,0", "-q", "-t", "raw", "-r", "24000", "-f", "S16_LE", "-c", "1", FILE_TTS)
 	if err := playCmd.Start(); err != nil {
 		return
@@ -366,12 +377,8 @@ func speakQwenFlash(text string) {
 	}
 }
 
-// ---------------- ASR & Agent (保持原逻辑) ----------------
+// ---------------- ASR (保持 V17) ----------------
 func callASRWebSocket(pcmData []byte) string {
-	// ... 保持原有代码不变 ...
-	// 为了节省篇幅，这里复用你之前的 ASR 代码
-	// 但建议在 send loop 和 recv loop 里如果你觉得慢，也可以加 log
-
 	dialer := websocket.Dialer{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	headers := http.Header{}
 	headers.Add("Authorization", "Bearer "+DASH_API_KEY)
@@ -400,7 +407,7 @@ func callASRWebSocket(pcmData []byte) string {
 			end = len(pcmData)
 		}
 		conn.WriteMessage(websocket.BinaryMessage, pcmData[i:end])
-		time.Sleep(10 * time.Millisecond) // 这里如果sleep太久会增加延迟，建议调小
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	finishFrame := map[string]interface{}{
@@ -435,6 +442,7 @@ func callASRWebSocket(pcmData []byte) string {
 	return finalText
 }
 
+// ---------------- Agent (保持 V17) ----------------
 func callAgent(prompt string) string {
 	url := "https://dashscope.aliyuncs.com/api/v1/apps/" + APP_ID + "/completion"
 	payload := map[string]interface{}{
