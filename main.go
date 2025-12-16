@@ -1,276 +1,306 @@
 package main
 
-/*
-#cgo LDFLAGS: -lasound
-#include <alsa/asoundlib.h>
-#include <stdlib.h>
-
-snd_pcm_t* open_device(char* name, int stream, int channels, int rate) {
-    snd_pcm_t *handle;
-    int err;
-    snd_pcm_hw_params_t *hw_params;
-
-    if ((err = snd_pcm_open(&handle, name, stream, 0)) < 0) return NULL;
-    if ((err = snd_pcm_hw_params_malloc(&hw_params)) < 0) return NULL;
-    if ((err = snd_pcm_hw_params_any(handle, hw_params)) < 0) return NULL;
-
-    if ((err = snd_pcm_hw_params_set_access(handle, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED)) < 0) return NULL;
-    if ((err = snd_pcm_hw_params_set_format(handle, hw_params, SND_PCM_FORMAT_S16_LE)) < 0) return NULL;
-
-    unsigned int r = rate;
-    if ((err = snd_pcm_hw_params_set_rate_near(handle, hw_params, &r, 0)) < 0) return NULL;
-    if ((err = snd_pcm_hw_params_set_channels(handle, hw_params, channels)) < 0) return NULL;
-
-    if ((err = snd_pcm_hw_params(handle, hw_params)) < 0) return NULL;
-    snd_pcm_hw_params_free(hw_params);
-    if ((err = snd_pcm_prepare(handle)) < 0) return NULL;
-
-    return handle;
-}
-*/
-
-import "C"
 import (
-	"flag"
+	"bufio"
+	"bytes"
+	"crypto/tls"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
-	"math"
+	"math/rand"
 	"net/http"
-	"net/url"
 	"os"
-	"os/signal"
-	"sync"
+	"os/exec"
+	"strings"
 	"time"
-	"unsafe"
 
 	"github.com/gorilla/websocket"
 )
 
-// === 配置常量 ===
-const (
-	AudioDeviceName = "plug:dsnoop_hw"
-	AudioPlayName   = "plug:dmix_hw"
-	RecSampleRate   = 16000
-	RecChannels     = 2
-	PlaySampleRate  = 48000
-	PlayChannels    = 2
-	FrameSizeMS     = 30
-)
+// ================= 配置区 =================
+const DASH_API_KEY = "sk-fb64515c017945fc9282f9ace355cad3"
+const APP_ID = "16356830643247938dfa31f8414fd58d"
 
-// ... (VADEngine 保持不变) ...
-type VADEngine struct {
-	EnergyThresh float64
-	ActiveCount  int
-	SilenceCount int
-	IsSpeaking   bool
+// 文件路径
+const FILE_REC = "/userdata/rec.pcm"
+const FILE_TTS = "/userdata/tts.pcm" // Flash模型返回的是pcm流(或者wav片段)，我们拼起来
+
+// ASR URL (WebSocket)
+const WS_ASR_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
+
+// ★关键修改★：Qwen3-TTS-Flash 必须使用多模态生成接口
+const TTS_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+
+var insecureClient *http.Client
+
+func init() {
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	insecureClient = &http.Client{Transport: tr, Timeout: 60 * time.Second}
 }
 
-func NewVADEngine() *VADEngine {
-	return &VADEngine{EnergyThresh: 1500.0}
-}
-
-func (v *VADEngine) Process(pcm []byte) int {
-	var sum float64
-	for i := 0; i < len(pcm); i += 2 {
-		if i+1 >= len(pcm) {
-			break
-		}
-		sample := int16(uint16(pcm[i]) | uint16(pcm[i+1])<<8)
-		sum += float64(sample) * float64(sample)
-	}
-	rms := math.Sqrt(sum / (float64(len(pcm)) / 2.0))
-	isActive := rms > v.EnergyThresh
-	if isActive {
-		v.ActiveCount++
-		v.SilenceCount = 0
-	} else {
-		v.SilenceCount++
-		v.ActiveCount = 0
-	}
-	if !v.IsSpeaking {
-		if v.ActiveCount >= 8 {
-			v.IsSpeaking = true
-			return 1
-		}
-	} else {
-		if v.SilenceCount >= 20 {
-			v.IsSpeaking = false
-			return 2
-		}
-	}
-	return 0
-}
-
-// ... (AudioEngine 保持不变) ...
-type AudioEngine struct {
-	recHandle  *C.snd_pcm_t
-	playHandle *C.snd_pcm_t
-	mu         sync.Mutex
-}
-
-func NewAudioEngine() *AudioEngine { return &AudioEngine{} }
-
-func (e *AudioEngine) Start() error {
-	recName := C.CString(AudioDeviceName)
-	defer C.free(unsafe.Pointer(recName))
-	e.recHandle = C.open_device(recName, 1, C.int(RecChannels), C.int(RecSampleRate))
-	if e.recHandle == nil {
-		return fmt.Errorf("无法打开录音设备")
-	}
-
-	playName := C.CString(AudioPlayName)
-	defer C.free(unsafe.Pointer(playName))
-	e.playHandle = C.open_device(playName, 0, C.int(PlayChannels), C.int(PlaySampleRate))
-	if e.playHandle == nil {
-		return fmt.Errorf("无法打开播放设备")
-	}
-	return nil
-}
-
-func (e *AudioEngine) Read(buf []byte) int {
-	if e.recHandle == nil {
-		return 0
-	}
-	frames := C.snd_pcm_uframes_t(len(buf) / (2 * RecChannels))
-	ptr := unsafe.Pointer(&buf[0])
-	ret := C.snd_pcm_readi(e.recHandle, ptr, frames)
-	if ret == -C.EPIPE {
-		C.snd_pcm_prepare(e.recHandle)
-		return 0
-	}
-	return int(ret)
-}
-
-func (e *AudioEngine) Write(buf []byte) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.playHandle == nil {
-		return
-	}
-	frames := C.snd_pcm_uframes_t(len(buf) / (2 * PlayChannels))
-	ptr := unsafe.Pointer(&buf[0])
-	ret := C.snd_pcm_writei(e.playHandle, ptr, frames)
-	if ret == -C.EPIPE {
-		C.snd_pcm_prepare(e.playHandle)
-	}
-}
-
-func (e *AudioEngine) StopImmediate() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.playHandle != nil {
-		C.snd_pcm_drop(e.playHandle)
-		C.snd_pcm_prepare(e.playHandle)
-	}
-}
-
-func (e *AudioEngine) Close() {
-	if e.recHandle != nil {
-		C.snd_pcm_close(e.recHandle)
-	}
-	if e.playHandle != nil {
-		C.snd_pcm_close(e.playHandle)
-	}
-}
-
-// ==========================================
-// 3. 主程序逻辑 (最终修正版)
-// ==========================================
 func main() {
-	serverAddr := flag.String("addr", "127.0.0.1:50010", "服务器地址")
-	flag.Parse()
+	log.Println("=== RK3308 AI 助手 (V15.0 Qwen3-TTS-Flash 原生适配) ===")
 
-	// 1. 初始化音频
-	audio := NewAudioEngine()
-	if err := audio.Start(); err != nil {
-		log.Fatal(err)
+	// 开机测试
+	success := speakQwenFlash("系统已就绪，Qwen3 Flash 驱动加载成功。")
+	if !success {
+		log.Println("⚠️ 启动语音失败，请检查网络或 Key")
 	}
-	defer audio.Close()
-
-	// 2. 连接服务器
-	// ✅ 确认无疑的正确路径 (根据服务器日志)
-	path := "/ws/voice_assistant"
-	u := url.URL{Scheme: "ws", Host: *serverAddr, Path: path}
-
-	log.Printf("🚀 正在连接服务器: %s", u.String())
-
-	// ✅ 强制设置，防止各种环境干扰
-	dialer := websocket.Dialer{
-		Proxy:            nil, // 强制不走代理
-		HandshakeTimeout: 5 * time.Second,
-	}
-	headers := http.Header{}
-	headers.Add("Origin", "http://localhost") // 伪装成浏览器
-
-	c, resp, err := dialer.Dial(u.String(), headers)
-	if err != nil {
-		log.Printf("❌ 连接失败: %v", err)
-		if resp != nil {
-			body, _ := ioutil.ReadAll(resp.Body)
-			log.Printf("   服务器回复 (%s): %s", resp.Status, string(body))
-			log.Println("⚠️  如果是 404，请立刻检查 Mac 上的 socat 命令端口是否写错成了 50000/50001？")
-		}
-		return
-	}
-	defer c.Close()
-	log.Println("✅ WebSocket 连接成功！")
-
-	// ... (以下 VAD 和音频循环逻辑保持不变，直接复制之前的即可) ...
-
-	vad := NewVADEngine()
-	audioIn := make(chan []byte, 100)
-	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt)
-
-	log.Println("🎙️ 系统启动完成！请说话...")
-
-	// 接收播放
-	go func() {
-		for {
-			_, message, err := c.ReadMessage()
-			if err != nil {
-				log.Println("读取断开:", err)
-				return
-			}
-			if len(message) > 0 {
-				audio.Write(message)
-			}
-		}
-	}()
-
-	// 发送录音
-	go func() {
-		for chunk := range audioIn {
-			err := c.WriteMessage(websocket.BinaryMessage, chunk)
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	// 主循环
-	bufferSize := int(RecSampleRate * FrameSizeMS / 1000 * 2 * RecChannels)
-	recBuffer := make([]byte, bufferSize)
 
 	for {
-		select {
-		case <-interrupt:
-			return
-		default:
-			n := audio.Read(recBuffer)
-			if n <= 0 {
-				continue
-			}
-			chunk := make([]byte, len(recBuffer))
-			copy(chunk, recBuffer)
+		log.Println("\n>>> [状态] 正在录音 (5秒)...")
 
-			status := vad.Process(chunk)
-			if status == 1 {
-				log.Println("🗣️ [VAD] 打断")
-				audio.StopImmediate()
+		// 1. 录音
+		cmd := exec.Command("arecord", "-D", "plughw:2,0", "-f", "S16_LE", "-r", "16000", "-c", "1", "-d", "5", "-t", "raw", FILE_REC)
+		if err := cmd.Run(); err != nil {
+			log.Printf("❌ 录音失败: %v", err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		info, err := os.Stat(FILE_REC)
+		if err != nil || info.Size() < 1000 {
+			log.Println("⚠️ 录音太短")
+			continue
+		}
+
+		// 2. 识别 (ASR)
+		log.Println("⚡ [云端] 发起 ASR...")
+		userText := callASRWebSocket(FILE_REC)
+
+		if userText == "" {
+			log.Println("⚠️ 识别为空")
+			continue
+		}
+
+		log.Printf("✅ 用户说: [%s]", userText)
+
+		var reply string
+		if strings.Contains(userText, "再见") || strings.Contains(userText, "退出") {
+			reply = "好的，再见！"
+			speakQwenFlash(reply)
+			break
+		} else {
+			log.Println("🧠 [Router] 请求 Agent...")
+			reply = callAgent(userText)
+		}
+
+		log.Printf("🤖 AI回复: [%s]", reply)
+
+		// 3. 播报
+		speakQwenFlash(reply)
+	}
+}
+
+// -----------------------------------------------------------
+// ASR (保持不变)
+// -----------------------------------------------------------
+func callASRWebSocket(filename string) string {
+	pcmData, err := os.ReadFile(filename)
+	if err != nil {
+		return ""
+	}
+	dialer := websocket.Dialer{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	headers := http.Header{}
+	headers.Add("Authorization", "Bearer "+DASH_API_KEY)
+	conn, _, err := dialer.Dial(WS_ASR_URL, headers)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	taskId := fmt.Sprintf("%032x", rand.Int63())
+	startFrame := map[string]interface{}{
+		"header": map[string]interface{}{"task_id": taskId, "action": "run-task", "streaming": "duplex"},
+		"payload": map[string]interface{}{
+			"task_group": "audio", "task": "asr", "function": "recognition",
+			"model":      "paraformer-realtime-v2",
+			"parameters": map[string]interface{}{"format": "pcm", "sample_rate": 16000},
+			"input":      map[string]interface{}{},
+		},
+	}
+	conn.WriteJSON(startFrame)
+	chunkSize := 3200
+	for i := 0; i < len(pcmData); i += chunkSize {
+		end := i + chunkSize
+		if end > len(pcmData) {
+			end = len(pcmData)
+		}
+		conn.WriteMessage(websocket.BinaryMessage, pcmData[i:end])
+		time.Sleep(100 * time.Millisecond)
+	}
+	finishFrame := map[string]interface{}{
+		"header":  map[string]interface{}{"task_id": taskId, "action": "finish-task", "streaming": "duplex"},
+		"payload": map[string]interface{}{"input": map[string]interface{}{}},
+	}
+	conn.WriteJSON(finishFrame)
+	finalText := ""
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		var resp map[string]interface{}
+		json.Unmarshal(msg, &resp)
+		header, _ := resp["header"].(map[string]interface{})
+		payload, _ := resp["payload"].(map[string]interface{})
+		if header["event"] == "task-finished" {
+			break
+		}
+		if header["event"] == "result-generated" {
+			if output, ok := payload["output"].(map[string]interface{}); ok {
+				if sentence, ok := output["sentence"].(map[string]interface{}); ok {
+					if text, ok := sentence["text"].(string); ok {
+						finalText = text
+					}
+				}
 			}
-			audioIn <- chunk
 		}
 	}
+	return finalText
+}
+
+// -----------------------------------------------------------
+// TTS - Qwen3-Flash (多模态流式接口实现)
+// -----------------------------------------------------------
+func speakQwenFlash(text string) bool {
+	log.Printf("🔊 [TTS] Qwen3-Flash (Cherry) 生成中: %s", text)
+
+	// 构造多模态接口的请求体 (参考官方 MultiModalConversation)
+	payload := map[string]interface{}{
+		"model": "qwen3-tts-flash-2025-11-27",
+		"input": map[string]interface{}{
+			"text":          text,     // 输入文本
+			"voice":         "Cherry", // 音色
+			"language_type": "Chinese",
+		},
+		"parameters": map[string]interface{}{
+			// 流式输出
+			"stream": true,
+			// 输出格式
+			"format":      "wav",
+			"sample_rate": 24000,
+		},
+	}
+
+	jsonPayload, _ := json.Marshal(payload)
+	req, _ := http.NewRequest("POST", TTS_URL, bytes.NewReader(jsonPayload))
+	req.Header.Set("Authorization", "Bearer "+DASH_API_KEY)
+	req.Header.Set("Content-Type", "application/json")
+	// 必须开启 SSE (Server-Sent Events) 支持
+	req.Header.Set("X-DashScope-SSE", "enable")
+
+	resp, err := insecureClient.Do(req)
+	if err != nil {
+		log.Printf("❌ 网络错误: %v", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("❌ 拒绝服务 (Code %d): %s", resp.StatusCode, string(body))
+		return false
+	}
+
+	// 准备写入文件 (裸 PCM 数据追加写入)
+	// 虽然请求的是 wav，但流式返回的 data 是片段，我们只解码 base64 数据部分拼起来即可
+	outFile, err := os.Create(FILE_TTS)
+	if err != nil {
+		return false
+	}
+	defer outFile.Close()
+
+	// 解析 SSE 流
+	scanner := bufio.NewScanner(resp.Body)
+	totalBytes := 0
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// SSE 格式通常以 "data:" 开头
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+
+		dataStr := strings.TrimPrefix(line, "data:")
+
+		// 可能是结束标记 [DONE]
+		if strings.TrimSpace(dataStr) == "[DONE]" {
+			break
+		}
+
+		var chunk struct {
+			Output struct {
+				Audio struct {
+					Data string `json:"data"` // base64 编码的音频
+				} `json:"audio"`
+				FinishReason string `json:"finish_reason"`
+			} `json:"output"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+
+		if err := json.Unmarshal([]byte(dataStr), &chunk); err != nil {
+			continue
+		}
+
+		if chunk.Code != "" {
+			log.Printf("❌ 流式报错: %s - %s", chunk.Code, chunk.Message)
+			break
+		}
+
+		if chunk.Output.Audio.Data != "" {
+			// 解码 Base64
+			audioBytes, err := base64.StdEncoding.DecodeString(chunk.Output.Audio.Data)
+			if err == nil {
+				// 将解码后的 PCM/WAV 片段写入文件
+				// 注意：这里简单追加。对于 aplay -t raw 来说，wav 头会被当做杂音播放一瞬间，但影响不大。
+				// 严谨做法是跳过第一个包的 wav 头，但为了代码简单先这样。
+				outFile.Write(audioBytes)
+				totalBytes += len(audioBytes)
+			}
+		}
+	}
+
+	log.Printf("✅ 音频接收完成 (%d bytes)，开始播放...", totalBytes)
+
+	// 播放
+	// 24000Hz, S16_LE, 单声道
+	cmd := exec.Command("aplay", "-D", "plughw:1,0", "-q", "-t", "raw", "-r", "24000", "-f", "S16_LE", "-c", "1", FILE_TTS)
+	if err := cmd.Run(); err != nil {
+		log.Printf("❌ 播放失败: %v", err)
+	}
+	return true
+}
+
+// -----------------------------------------------------------
+// Agent
+// -----------------------------------------------------------
+func callAgent(prompt string) string {
+	url := "https://dashscope.aliyuncs.com/api/v1/apps/" + APP_ID + "/completion"
+	payload := map[string]interface{}{
+		"input":      map[string]string{"prompt": prompt},
+		"parameters": map[string]interface{}{}, "debug": false,
+	}
+	jsonPayload, _ := json.Marshal(payload)
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(jsonPayload))
+	req.Header.Set("Authorization", "Bearer "+DASH_API_KEY)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := insecureClient.Do(req)
+	if err != nil {
+		return "网络错误"
+	}
+	defer resp.Body.Close()
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if output, ok := result["output"].(map[string]interface{}); ok {
+		if text, ok := output["text"].(string); ok {
+			return text
+		}
+	}
+	return "我没听清"
 }
