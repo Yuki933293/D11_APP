@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net" // 新增 net 包用于设置拨号超时
 	"net/http"
 	"os"
 	"os/exec"
@@ -30,6 +31,10 @@ const APP_ID = "16356830643247938dfa31f8414fd58d"
 
 const WS_ASR_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 const TTS_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+
+var EXIT_WORDS = []string{
+	"关闭", "再见", "退出", "关机", "拜拜", "退下",
+}
 
 var INTERRUPT_WORDS = []string{
 	"等一下", "暂停", "停一下", "别说了", "闭嘴", "打住", "停止", "安静",
@@ -52,9 +57,35 @@ var (
 	globalSessionID string
 )
 
+// ★★★ 核心修复：init 函数 ★★★
 func init() {
-	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
-	insecureClient = &http.Client{Transport: tr, Timeout: 10 * time.Second}
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+
+		// 1. 连接池配置 (保持高性能)
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+		DisableKeepAlives:   false,
+
+		// 2. 细粒度超时控制 (替代全局 Timeout)
+		// 限制建立 TCP 连接的时间 (5秒连不上就报错)
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+
+		// 限制 TLS 握手时间
+		TLSHandshakeTimeout: 5 * time.Second,
+
+		// 限制“发出请求到收到第一个字节”的时间
+		// 这就是我们要的“反应快”，如果服务器 5秒 都不给第一个包，说明挂了
+		ResponseHeaderTimeout: 5 * time.Second,
+	}
+
+	// 3. 全局读取超时设为 0 (无限) 或者很长 (如 2分钟)
+	// 这样 TTS 生成长音频时（比如念 1分钟），才不会被掐断
+	insecureClient = &http.Client{Transport: tr, Timeout: 0}
 }
 
 func generateSessionID() string {
@@ -63,11 +94,10 @@ func generateSessionID() string {
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
-	log.Println("=== RK3308 AI 助手 (V19.0 极速模型版) ===")
+	log.Println("=== RK3308 AI 助手 (V19.4 长文本修复版) ===")
 
 	globalSessionID = generateSessionID()
 	log.Printf("✨ 会话ID: %s", globalSessionID)
-	log.Printf("🛡️ 熔断关键词: %v", INTERRUPT_WORDS)
 
 	aecProc := aec.NewProcessor()
 	vadEng, err := vado.New()
@@ -89,8 +119,8 @@ func logCost(stage string, start time.Time) {
 	log.Printf("⏱️ [%s] 耗时: %d ms", stage, duration.Milliseconds())
 }
 
-func containsKeyword(text string) bool {
-	for _, kw := range INTERRUPT_WORDS {
+func containsAny(text string, keywords []string) bool {
+	for _, kw := range keywords {
 		if strings.Contains(text, kw) {
 			return true
 		}
@@ -106,6 +136,20 @@ func performStop() {
 	stateMutex.Lock()
 	currentState = STATE_LISTENING
 	stateMutex.Unlock()
+}
+
+func performExit() {
+	log.Println("💀 检测到退出指令，立即终止！")
+	isExiting = true
+	if stopPlayChan != nil {
+		select {
+		case stopPlayChan <- struct{}{}:
+		default:
+		}
+	}
+	speakQwenFlashStream("再见")
+	log.Println("👋 进程自杀")
+	os.Exit(0)
 }
 
 func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
@@ -134,7 +178,7 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 
 	for {
 		if isExiting {
-			time.Sleep(1 * time.Second)
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
@@ -184,7 +228,7 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 			if vadSpeechCounter > 15 {
 				if !isSpeechTriggered {
 					if curr == STATE_SPEAKING || curr == STATE_THINKING {
-						log.Println("🛡️ [VAD] 监听到疑似打断，后台校验中...")
+						log.Println("🛡️ [VAD] 监听到疑似打断...")
 					} else {
 						log.Println("👂 [VAD] 开始录音...")
 					}
@@ -195,7 +239,9 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 			if isSpeechTriggered {
 				asrBuffer = append(asrBuffer, currentFrame...)
 
-				if vadSilenceCounter > 40 && len(asrBuffer) > 16000*0.5 {
+				// 保持 18帧 (360ms) 的极速断句
+				if vadSilenceCounter > 18 && len(asrBuffer) > 16000*0.3 {
+
 					vadWaitDuration := time.Since(silenceStartTime)
 
 					bufferCopy := make([]int16, len(asrBuffer))
@@ -244,11 +290,17 @@ func processInterruptionCheck(pcmDataInt16 []int16) {
 
 	log.Printf("🕵️ [打断校验] 识别内容: [%s]", text)
 
-	if containsKeyword(text) {
-		log.Println("🛑 [校验通过] 触发打断，停止播放！")
+	if containsAny(text, EXIT_WORDS) {
+		log.Println("💀 [校验通过] 立即退出！")
+		performExit()
+		return
+	}
+
+	if containsAny(text, INTERRUPT_WORDS) {
+		log.Println("🛑 [校验通过] 暂停播放")
 		performStop()
 	} else {
-		log.Println("🛡️ [校验忽略] 非打断词，继续播放")
+		log.Println("🛡️ [校验忽略] 继续播放")
 	}
 }
 
@@ -271,19 +323,16 @@ func processASR(pcmDataInt16 []int16) {
 	}
 	log.Printf("✅ 用户说: [%s]", text)
 
-	if containsKeyword(text) {
-		log.Println("🚫 [指令熔断] 检测到停止指令，不请求 LLM")
-		performStop()
-		setState(STATE_LISTENING)
-		speakQwenFlashStream("好的")
+	if containsAny(text, EXIT_WORDS) {
+		log.Println("💀 [指令熔断] 用户要求关闭")
+		performExit()
 		return
 	}
 
-	if strings.Contains(text, "关闭") || strings.Contains(text, "再见") {
-		isExiting = true
-		speakQwenFlashStream("再见")
-		time.Sleep(2 * time.Second)
-		os.Exit(0)
+	if containsAny(text, INTERRUPT_WORDS) {
+		log.Println("🚫 [指令熔断] 用户要求暂停")
+		performStop()
+		speakQwenFlashStream("好的")
 		return
 	}
 
@@ -302,7 +351,7 @@ func processASR(pcmDataInt16 []int16) {
 	stateMutex.Lock()
 	if currentState != STATE_THINKING || isExiting {
 		stateMutex.Unlock()
-		log.Println("⚠️ [Process] 状态已变更(检测到打断)，放弃播放")
+		log.Println("⚠️ [Process] 状态已变更，放弃播放")
 		return
 	}
 	currentState = STATE_SPEAKING
@@ -318,7 +367,6 @@ func processASR(pcmDataInt16 []int16) {
 	stateMutex.Unlock()
 }
 
-// ---------------- TTS (修改：换模型) ----------------
 func speakQwenFlashStream(text string) {
 	select {
 	case <-stopPlayChan:
@@ -327,7 +375,6 @@ func speakQwenFlashStream(text string) {
 	}
 
 	payload := map[string]interface{}{
-		// ★★★ 1. 修改模型为用户指定的极速版 ★★★
 		"model":      "qwen3-tts-flash-2025-09-18",
 		"input":      map[string]interface{}{"text": text, "voice": "Cherry", "language_type": "Chinese"},
 		"parameters": map[string]interface{}{"stream": true, "format": "pcm", "sample_rate": 24000},
@@ -369,7 +416,7 @@ func speakQwenFlashStream(text string) {
 	for scanner.Scan() {
 		select {
 		case <-stopPlayChan:
-			log.Println("🛑 [TTS] 收到停止信号，中断播放")
+			log.Println("🛑 [TTS] 收到停止信号")
 			playCmd.Process.Kill()
 			return
 		default:
@@ -488,7 +535,6 @@ func callASRWebSocket(pcmData []byte) string {
 	return finalText
 }
 
-// ---------------- Agent (修改：关闭思考与搜索) ----------------
 func callAgent(prompt string) string {
 	url := "https://dashscope.aliyuncs.com/api/v1/apps/" + APP_ID + "/completion"
 
@@ -498,10 +544,8 @@ func callAgent(prompt string) string {
 			"session_id": globalSessionID,
 		},
 		"parameters": map[string]interface{}{
-			// ★★★ 2. 核心修改：显式关闭思考和搜索 ★★★
-			// 虽然 qwen-plus 默认可能关闭，但显式设置为 false 最稳妥
-			"enable_thinking": false, // 关闭思维链 (Reasoning)
-			"enable_search":   false, // 关闭联网搜索 (大幅降低首字延迟)
+			"enable_thinking": false,
+			"enable_search":   false,
 		},
 		"debug": false,
 	}
