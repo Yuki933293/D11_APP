@@ -31,7 +31,6 @@ const APP_ID = "16356830643247938dfa31f8414fd58d"
 const WS_ASR_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 const TTS_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 
-// ★★★ 核心定义：打断关键词 ★★★
 var INTERRUPT_WORDS = []string{
 	"等一下", "暂停", "停一下", "别说了", "闭嘴", "打住", "停止", "安静",
 }
@@ -55,7 +54,6 @@ var (
 
 func init() {
 	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
-	// 设置超时，防止网络卡死
 	insecureClient = &http.Client{Transport: tr, Timeout: 10 * time.Second}
 }
 
@@ -65,7 +63,7 @@ func generateSessionID() string {
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
-	log.Println("=== RK3308 AI 助手 (V18.9 云端熔断修正版) ===")
+	log.Println("=== RK3308 AI 助手 (V19.0 极速模型版) ===")
 
 	globalSessionID = generateSessionID()
 	log.Printf("✨ 会话ID: %s", globalSessionID)
@@ -77,10 +75,8 @@ func main() {
 		log.Fatalf("VAD Init 失败: %v", err)
 	}
 
-	// 保持 Mode 3 强力抗噪
 	vadEng.SetMode(3)
 
-	// 带缓冲通道，防信号丢失
 	stopPlayChan = make(chan struct{}, 1)
 
 	go audioLoop(aecProc, vadEng)
@@ -93,7 +89,6 @@ func logCost(stage string, start time.Time) {
 	log.Printf("⏱️ [%s] 耗时: %d ms", stage, duration.Milliseconds())
 }
 
-// 辅助函数：检查关键词
 func containsKeyword(text string) bool {
 	for _, kw := range INTERRUPT_WORDS {
 		if strings.Contains(text, kw) {
@@ -103,14 +98,11 @@ func containsKeyword(text string) bool {
 	return false
 }
 
-// 辅助函数：执行物理停止
 func performStop() {
-	// 1. 发送停止信号 (非阻塞)
 	select {
 	case stopPlayChan <- struct{}{}:
 	default:
 	}
-	// 2. 状态强制归位
 	stateMutex.Lock()
 	currentState = STATE_LISTENING
 	stateMutex.Unlock()
@@ -138,8 +130,6 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 	vadSilenceCounter := 0
 	vadSpeechCounter := 0
 	isSpeechTriggered := false
-
-	// ★★★ 修复点 1: 声明变量 ★★★
 	var silenceStartTime time.Time
 
 	for {
@@ -182,18 +172,15 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 			if isSpeech {
 				vadSpeechCounter++
 				vadSilenceCounter = 0
-				// 重置静音开始时间
 				silenceStartTime = time.Time{}
 			} else {
 				vadSilenceCounter++
 				vadSpeechCounter = 0
-				// 记录静音开始时间
 				if vadSilenceCounter == 1 {
 					silenceStartTime = time.Now()
 				}
 			}
 
-			// === VAD 触发逻辑 ===
 			if vadSpeechCounter > 15 {
 				if !isSpeechTriggered {
 					if curr == STATE_SPEAKING || curr == STATE_THINKING {
@@ -208,11 +195,7 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 			if isSpeechTriggered {
 				asrBuffer = append(asrBuffer, currentFrame...)
 
-				// 判停：800ms 静音
 				if vadSilenceCounter > 40 && len(asrBuffer) > 16000*0.5 {
-
-					// ★★★ 修复点 2: 使用变量 (打印日志) ★★★
-					// 之前这里漏掉了使用 silenceStartTime，导致报错
 					vadWaitDuration := time.Since(silenceStartTime)
 
 					bufferCopy := make([]int16, len(asrBuffer))
@@ -222,7 +205,6 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 					isSpeechTriggered = false
 					vadSilenceCounter = 0
 
-					// ★★★ 核心分流 ★★★
 					if curr == STATE_LISTENING {
 						log.Printf("⚡ [VAD] 录音结束 (静音: %d ms)，正常处理", vadWaitDuration.Milliseconds())
 						go processASR(bufferCopy)
@@ -232,7 +214,6 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 					}
 				}
 			} else {
-				// Pre-roll
 				if len(asrBuffer) > 16000/2 {
 					asrBuffer = asrBuffer[VAD_FRAME_SAMPLES:]
 					asrBuffer = append(asrBuffer, currentFrame...)
@@ -250,7 +231,6 @@ func setState(s AppState) {
 	currentState = s
 }
 
-// ★★★ 第一道防线：专用打断校验通道 ★★★
 func processInterruptionCheck(pcmDataInt16 []int16) {
 	pcmBytes := make([]byte, len(pcmDataInt16)*2)
 	for i, v := range pcmDataInt16 {
@@ -272,7 +252,6 @@ func processInterruptionCheck(pcmDataInt16 []int16) {
 	}
 }
 
-// ★★★ 主对话链路 ★★★
 func processASR(pcmDataInt16 []int16) {
 	pipelineStart := time.Now()
 	setState(STATE_THINKING)
@@ -292,7 +271,6 @@ func processASR(pcmDataInt16 []int16) {
 	}
 	log.Printf("✅ 用户说: [%s]", text)
 
-	// ★★★ 第二道防线：主流程指令熔断 ★★★
 	if containsKeyword(text) {
 		log.Println("🚫 [指令熔断] 检测到停止指令，不请求 LLM")
 		performStop()
@@ -301,7 +279,6 @@ func processASR(pcmDataInt16 []int16) {
 		return
 	}
 
-	// 特殊指令拦截
 	if strings.Contains(text, "关闭") || strings.Contains(text, "再见") {
 		isExiting = true
 		speakQwenFlashStream("再见")
@@ -322,7 +299,6 @@ func processASR(pcmDataInt16 []int16) {
 	logCost("LLM思考", llmStart)
 	log.Printf("🤖 AI回复: %s", reply)
 
-	// ★★★ 第三道防线：过时检查 ★★★
 	stateMutex.Lock()
 	if currentState != STATE_THINKING || isExiting {
 		stateMutex.Unlock()
@@ -342,9 +318,8 @@ func processASR(pcmDataInt16 []int16) {
 	stateMutex.Unlock()
 }
 
-// ---------------- TTS (流式 + 缓冲清理) ----------------
+// ---------------- TTS (修改：换模型) ----------------
 func speakQwenFlashStream(text string) {
-	// 清理僵尸信号
 	select {
 	case <-stopPlayChan:
 		log.Println("🧹 [TTS] 清理残留信号")
@@ -352,7 +327,8 @@ func speakQwenFlashStream(text string) {
 	}
 
 	payload := map[string]interface{}{
-		"model":      "qwen3-tts-flash-2025-11-27",
+		// ★★★ 1. 修改模型为用户指定的极速版 ★★★
+		"model":      "qwen3-tts-flash-2025-09-18",
 		"input":      map[string]interface{}{"text": text, "voice": "Cherry", "language_type": "Chinese"},
 		"parameters": map[string]interface{}{"stream": true, "format": "pcm", "sample_rate": 24000},
 	}
@@ -391,7 +367,6 @@ func speakQwenFlashStream(text string) {
 	startTime := time.Now()
 
 	for scanner.Scan() {
-		// 检查打断信号
 		select {
 		case <-stopPlayChan:
 			log.Println("🛑 [TTS] 收到停止信号，中断播放")
@@ -513,6 +488,7 @@ func callASRWebSocket(pcmData []byte) string {
 	return finalText
 }
 
+// ---------------- Agent (修改：关闭思考与搜索) ----------------
 func callAgent(prompt string) string {
 	url := "https://dashscope.aliyuncs.com/api/v1/apps/" + APP_ID + "/completion"
 
@@ -521,8 +497,13 @@ func callAgent(prompt string) string {
 			"prompt":     prompt,
 			"session_id": globalSessionID,
 		},
-		"parameters": map[string]interface{}{},
-		"debug":      false,
+		"parameters": map[string]interface{}{
+			// ★★★ 2. 核心修改：显式关闭思考和搜索 ★★★
+			// 虽然 qwen-plus 默认可能关闭，但显式设置为 false 最稳妥
+			"enable_thinking": false, // 关闭思维链 (Reasoning)
+			"enable_search":   false, // 关闭联网搜索 (大幅降低首字延迟)
+		},
+		"debug": false,
 	}
 
 	jsonPayload, _ := json.Marshal(payload)
