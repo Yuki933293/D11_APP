@@ -28,6 +28,7 @@ snd_pcm_t* open_device(char* name, int stream, int channels, int rate) {
     return handle;
 }
 */
+
 import "C"
 import (
 	"flag"
