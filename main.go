@@ -31,6 +31,11 @@ const APP_ID = "16356830643247938dfa31f8414fd58d"
 const WS_ASR_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 const TTS_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 
+// ★★★ 核心定义：打断关键词 ★★★
+var INTERRUPT_WORDS = []string{
+	"等一下", "暂停", "停一下", "别说了", "闭嘴", "打住", "停止", "安静",
+}
+
 type AppState int
 
 const (
@@ -50,7 +55,8 @@ var (
 
 func init() {
 	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
-	insecureClient = &http.Client{Transport: tr, Timeout: 60 * time.Second}
+	// 设置超时，防止网络卡死
+	insecureClient = &http.Client{Transport: tr, Timeout: 10 * time.Second}
 }
 
 func generateSessionID() string {
@@ -59,10 +65,11 @@ func generateSessionID() string {
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
-	log.Println("=== RK3308 AI 助手 (V18.7 最终完美版) ===")
+	log.Println("=== RK3308 AI 助手 (V18.9 云端熔断修正版) ===")
 
 	globalSessionID = generateSessionID()
 	log.Printf("✨ 会话ID: %s", globalSessionID)
+	log.Printf("🛡️ 熔断关键词: %v", INTERRUPT_WORDS)
 
 	aecProc := aec.NewProcessor()
 	vadEng, err := vado.New()
@@ -70,11 +77,10 @@ func main() {
 		log.Fatalf("VAD Init 失败: %v", err)
 	}
 
-	// ★★★ VAD 策略: Mode 3 (强力抗噪，防拍手误触) ★★★
+	// 保持 Mode 3 强力抗噪
 	vadEng.SetMode(3)
 
-	// ★★★ 核心修复 1: 使用带缓冲的 Channel (容量1) ★★★
-	// 确保 audioLoop 发出的打断信号一定能被 speak 函数接收到，不会丢失
+	// 带缓冲通道，防信号丢失
 	stopPlayChan = make(chan struct{}, 1)
 
 	go audioLoop(aecProc, vadEng)
@@ -85,6 +91,29 @@ func main() {
 func logCost(stage string, start time.Time) {
 	duration := time.Since(start)
 	log.Printf("⏱️ [%s] 耗时: %d ms", stage, duration.Milliseconds())
+}
+
+// 辅助函数：检查关键词
+func containsKeyword(text string) bool {
+	for _, kw := range INTERRUPT_WORDS {
+		if strings.Contains(text, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// 辅助函数：执行物理停止
+func performStop() {
+	// 1. 发送停止信号 (非阻塞)
+	select {
+	case stopPlayChan <- struct{}{}:
+	default:
+	}
+	// 2. 状态强制归位
+	stateMutex.Lock()
+	currentState = STATE_LISTENING
+	stateMutex.Unlock()
 }
 
 func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
@@ -109,6 +138,8 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 	vadSilenceCounter := 0
 	vadSpeechCounter := 0
 	isSpeechTriggered := false
+
+	// ★★★ 修复点 1: 声明变量 ★★★
 	var silenceStartTime time.Time
 
 	for {
@@ -151,64 +182,62 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 			if isSpeech {
 				vadSpeechCounter++
 				vadSilenceCounter = 0
+				// 重置静音开始时间
 				silenceStartTime = time.Time{}
 			} else {
 				vadSilenceCounter++
 				vadSpeechCounter = 0
+				// 记录静音开始时间
 				if vadSilenceCounter == 1 {
 					silenceStartTime = time.Now()
 				}
 			}
 
-			// ★★★ VAD 策略: 阈值回调至 15帧 (300ms) ★★★
-			// Mode 3 已经过滤了噪音，所以这里可以用较短的时间阈值，确保"等一下"能生效
+			// === VAD 触发逻辑 ===
 			if vadSpeechCounter > 15 {
-				if curr == STATE_SPEAKING || curr == STATE_THINKING {
-					log.Println("🛑 [Barge-in] 检测到人声指令，执行打断！")
-
-					// 非阻塞发送 (由于有缓冲，这里几乎肯定能发进去)
-					select {
-					case stopPlayChan <- struct{}{}:
-					default:
-						// 如果缓冲区满了(极少见)，说明已经有一个打断信号了，忽略本次
+				if !isSpeechTriggered {
+					if curr == STATE_SPEAKING || curr == STATE_THINKING {
+						log.Println("🛡️ [VAD] 监听到疑似打断，后台校验中...")
+					} else {
+						log.Println("👂 [VAD] 开始录音...")
 					}
-
-					setState(STATE_LISTENING)
-					asrBuffer = []int16{}
-					isSpeechTriggered = true
-				}
-
-				if curr == STATE_LISTENING && !isSpeechTriggered {
-					log.Println("👂 [VAD] 检测到说话开始...")
 					isSpeechTriggered = true
 				}
 			}
 
-			if curr == STATE_LISTENING {
-				if isSpeechTriggered {
-					asrBuffer = append(asrBuffer, currentFrame...)
+			if isSpeechTriggered {
+				asrBuffer = append(asrBuffer, currentFrame...)
 
-					// 判停：800ms 静音
-					if vadSilenceCounter > 40 && len(asrBuffer) > 16000*0.5 {
-						vadWaitDuration := time.Since(silenceStartTime)
-						log.Printf("⚡ [VAD] 说话结束 (静音: %d ms)", vadWaitDuration.Milliseconds())
+				// 判停：800ms 静音
+				if vadSilenceCounter > 40 && len(asrBuffer) > 16000*0.5 {
 
-						bufferCopy := make([]int16, len(asrBuffer))
-						copy(bufferCopy, asrBuffer)
+					// ★★★ 修复点 2: 使用变量 (打印日志) ★★★
+					// 之前这里漏掉了使用 silenceStartTime，导致报错
+					vadWaitDuration := time.Since(silenceStartTime)
 
+					bufferCopy := make([]int16, len(asrBuffer))
+					copy(bufferCopy, asrBuffer)
+
+					asrBuffer = []int16{}
+					isSpeechTriggered = false
+					vadSilenceCounter = 0
+
+					// ★★★ 核心分流 ★★★
+					if curr == STATE_LISTENING {
+						log.Printf("⚡ [VAD] 录音结束 (静音: %d ms)，正常处理", vadWaitDuration.Milliseconds())
 						go processASR(bufferCopy)
-
-						asrBuffer = []int16{}
-						isSpeechTriggered = false
-						vadSilenceCounter = 0
-					}
-				} else {
-					if len(asrBuffer) > 16000/2 {
-						asrBuffer = asrBuffer[VAD_FRAME_SAMPLES:]
-						asrBuffer = append(asrBuffer, currentFrame...)
 					} else {
-						asrBuffer = append(asrBuffer, currentFrame...)
+						log.Printf("⚡ [VAD] 录音结束，校验打断词...")
+						go processInterruptionCheck(bufferCopy)
 					}
+				}
+			} else {
+				// Pre-roll
+				if len(asrBuffer) > 16000/2 {
+					asrBuffer = asrBuffer[VAD_FRAME_SAMPLES:]
+					asrBuffer = append(asrBuffer, currentFrame...)
+				} else {
+					asrBuffer = append(asrBuffer, currentFrame...)
 				}
 			}
 		}
@@ -221,10 +250,31 @@ func setState(s AppState) {
 	currentState = s
 }
 
-func processASR(pcmDataInt16 []int16) {
-	// [1] 全链路计时起点
-	pipelineStart := time.Now()
+// ★★★ 第一道防线：专用打断校验通道 ★★★
+func processInterruptionCheck(pcmDataInt16 []int16) {
+	pcmBytes := make([]byte, len(pcmDataInt16)*2)
+	for i, v := range pcmDataInt16 {
+		binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(v))
+	}
 
+	text := callASRWebSocket(pcmBytes)
+	if text == "" {
+		return
+	}
+
+	log.Printf("🕵️ [打断校验] 识别内容: [%s]", text)
+
+	if containsKeyword(text) {
+		log.Println("🛑 [校验通过] 触发打断，停止播放！")
+		performStop()
+	} else {
+		log.Println("🛡️ [校验忽略] 非打断词，继续播放")
+	}
+}
+
+// ★★★ 主对话链路 ★★★
+func processASR(pcmDataInt16 []int16) {
+	pipelineStart := time.Now()
 	setState(STATE_THINKING)
 
 	pcmBytes := make([]byte, len(pcmDataInt16)*2)
@@ -232,14 +282,9 @@ func processASR(pcmDataInt16 []int16) {
 		binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(v))
 	}
 
-	// ==========================================
-	// [2] 测量 ASR (语音转文字) 耗时
-	// ==========================================
 	asrStart := time.Now()
 	text := callASRWebSocket(pcmBytes)
-
-	// ★★★ 新增日志 ★★★
-	logCost("ASR识别(语音转文字)", asrStart)
+	logCost("ASR识别", asrStart)
 
 	if text == "" {
 		setState(STATE_LISTENING)
@@ -247,36 +292,37 @@ func processASR(pcmDataInt16 []int16) {
 	}
 	log.Printf("✅ 用户说: [%s]", text)
 
-	// 指令拦截
+	// ★★★ 第二道防线：主流程指令熔断 ★★★
+	if containsKeyword(text) {
+		log.Println("🚫 [指令熔断] 检测到停止指令，不请求 LLM")
+		performStop()
+		setState(STATE_LISTENING)
+		speakQwenFlashStream("好的")
+		return
+	}
+
+	// 特殊指令拦截
 	if strings.Contains(text, "关闭") || strings.Contains(text, "再见") {
 		isExiting = true
-		speakQwenFlashStream("好的，再见。")
-		time.Sleep(3 * time.Second)
+		speakQwenFlashStream("再见")
+		time.Sleep(2 * time.Second)
 		os.Exit(0)
 		return
 	}
 
 	if strings.Contains(text, "重置") || strings.Contains(text, "忘掉") {
 		globalSessionID = generateSessionID()
-		speakQwenFlashStream("好的，我已经重置了记忆。")
-		stateMutex.Lock()
-		currentState = STATE_LISTENING
-		stateMutex.Unlock()
+		speakQwenFlashStream("记忆已重置")
+		setState(STATE_LISTENING)
 		return
 	}
 
-	// ==========================================
-	// [3] 测量 LLM (大模型思考) 耗时
-	// ==========================================
 	llmStart := time.Now()
 	reply := callAgent(text)
-
-	// ★★★ 新增日志 ★★★
-	logCost("LLM思考(智能生成)", llmStart)
-
+	logCost("LLM思考", llmStart)
 	log.Printf("🤖 AI回复: %s", reply)
 
-	// 过时检查
+	// ★★★ 第三道防线：过时检查 ★★★
 	stateMutex.Lock()
 	if currentState != STATE_THINKING || isExiting {
 		stateMutex.Unlock()
@@ -286,13 +332,8 @@ func processASR(pcmDataInt16 []int16) {
 	currentState = STATE_SPEAKING
 	stateMutex.Unlock()
 
-	// ==========================================
-	// [4] TTS 播放 (TTFB 已在函数内部打印)
-	// ==========================================
 	speakQwenFlashStream(reply)
-
-	// [5] 全链路总耗时
-	logCost("全链路总耗时(对话闭环)", pipelineStart)
+	logCost("全链路总耗时", pipelineStart)
 
 	stateMutex.Lock()
 	if currentState == STATE_SPEAKING && !isExiting {
@@ -303,11 +344,10 @@ func processASR(pcmDataInt16 []int16) {
 
 // ---------------- TTS (流式 + 缓冲清理) ----------------
 func speakQwenFlashStream(text string) {
-	// ★★★ 核心修复 2: 清理“僵尸”信号 (Drain Channel) ★★★
-	// 在开始新播放前，排空可能残留的旧打断信号，防止误杀本次播放
+	// 清理僵尸信号
 	select {
 	case <-stopPlayChan:
-		log.Println("🧹 [TTS] 清理上一轮残留的打断信号")
+		log.Println("🧹 [TTS] 清理残留信号")
 	default:
 	}
 
@@ -351,10 +391,10 @@ func speakQwenFlashStream(text string) {
 	startTime := time.Now()
 
 	for scanner.Scan() {
-		// 检查打断信号 (现在 channel 有缓冲，信号不会丢了)
+		// 检查打断信号
 		select {
 		case <-stopPlayChan:
-			log.Println("🛑 [TTS] 流式播放被打断")
+			log.Println("🛑 [TTS] 收到停止信号，中断播放")
 			playCmd.Process.Kill()
 			return
 		default:
@@ -388,7 +428,7 @@ func speakQwenFlashStream(text string) {
 			}
 
 			if firstPacket {
-				logCost("TTS 首包延迟 (TTFB)", startTime)
+				logCost("TTS 首包", startTime)
 				firstPacket = false
 			}
 
@@ -405,7 +445,6 @@ func speakQwenFlashStream(text string) {
 	case <-stopPlayChan:
 		if playCmd.Process != nil {
 			playCmd.Process.Kill()
-			log.Println("🛑 [TTS] 播放尾部被打断")
 		}
 	}
 }
@@ -480,7 +519,7 @@ func callAgent(prompt string) string {
 	payload := map[string]interface{}{
 		"input": map[string]string{
 			"prompt":     prompt,
-			"session_id": globalSessionID, // 携带记忆
+			"session_id": globalSessionID,
 		},
 		"parameters": map[string]interface{}{},
 		"debug":      false,
