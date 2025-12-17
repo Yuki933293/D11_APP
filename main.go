@@ -11,7 +11,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
-	"net" // 新增 net 包用于设置拨号超时
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -31,6 +31,9 @@ const APP_ID = "16356830643247938dfa31f8414fd58d"
 
 const WS_ASR_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 const TTS_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+
+// ★★★ 音乐文件路径 (必须确保文件存在) ★★★
+const MUSIC_FILE_PATH = "/userdata/song.wav"
 
 var EXIT_WORDS = []string{
 	"关闭", "再见", "退出", "关机", "拜拜", "退下",
@@ -55,36 +58,27 @@ var (
 	insecureClient  *http.Client
 	isExiting       bool
 	globalSessionID string
+
+	// ★★★ 音乐播放控制变量 ★★★
+	musicCmd       *exec.Cmd
+	musicMutex     sync.Mutex
+	isMusicPlaying bool
 )
 
-// ★★★ 核心修复：init 函数 ★★★
 func init() {
 	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-
-		// 1. 连接池配置 (保持高性能)
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
 		DisableKeepAlives:   false,
-
-		// 2. 细粒度超时控制 (替代全局 Timeout)
-		// 限制建立 TCP 连接的时间 (5秒连不上就报错)
 		DialContext: (&net.Dialer{
 			Timeout:   5 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-
-		// 限制 TLS 握手时间
-		TLSHandshakeTimeout: 5 * time.Second,
-
-		// 限制“发出请求到收到第一个字节”的时间
-		// 这就是我们要的“反应快”，如果服务器 5秒 都不给第一个包，说明挂了
+		TLSHandshakeTimeout:   5 * time.Second,
 		ResponseHeaderTimeout: 5 * time.Second,
 	}
-
-	// 3. 全局读取超时设为 0 (无限) 或者很长 (如 2分钟)
-	// 这样 TTS 生成长音频时（比如念 1分钟），才不会被掐断
 	insecureClient = &http.Client{Transport: tr, Timeout: 0}
 }
 
@@ -92,9 +86,84 @@ func generateSessionID() string {
 	return fmt.Sprintf("session-%d-%d", time.Now().Unix(), rand.Intn(10000))
 }
 
+// ★★★ 简易音乐播放器 (调用 aplay) ★★★
+func playMusic() {
+	musicMutex.Lock()
+	defer musicMutex.Unlock()
+
+	// 1. 如果已经在播，先杀掉旧进程
+	if musicCmd != nil && musicCmd.Process != nil {
+		if musicCmd.ProcessState == nil || !musicCmd.ProcessState.Exited() {
+			log.Println("🎵 切歌 (重启播放)")
+			musicCmd.Process.Kill()
+			musicCmd.Wait() // 等待彻底退出
+		}
+	}
+
+	// 2. 启动新进程
+	// 使用 -D default 确保走 dmix 混音，和 TTS 兼容
+	musicCmd = exec.Command("aplay", "-D", "default", "-q", MUSIC_FILE_PATH)
+
+	if err := musicCmd.Start(); err != nil {
+		log.Printf("❌ 无法播放音乐: %v", err)
+		isMusicPlaying = false
+		return
+	}
+
+	isMusicPlaying = true
+	log.Println("🎵 开始播放音乐...")
+
+	// 3. 监听播放自然结束
+	go func(cmd *exec.Cmd) {
+		cmd.Wait()
+		musicMutex.Lock()
+		if musicCmd == cmd { // 确保不是被新指令挤掉的
+			isMusicPlaying = false
+			log.Println("🎵 音乐播放结束")
+		}
+		musicMutex.Unlock()
+	}(musicCmd)
+}
+
+// ★★★ 停止音乐 ★★★
+func stopMusic() {
+	musicMutex.Lock()
+	defer musicMutex.Unlock()
+
+	if musicCmd != nil && musicCmd.Process != nil {
+		// 检查进程是否还活着
+		if musicCmd.ProcessState == nil || !musicCmd.ProcessState.Exited() {
+			log.Println("🛑 停止背景音乐")
+			musicCmd.Process.Kill()
+		}
+	}
+	isMusicPlaying = false
+}
+
+// ★★★ 音乐意图识别 ★★★
+func handleMusicIntent(text string) bool {
+	// 播放指令
+	if strings.Contains(text, "放歌") || strings.Contains(text, "播放音乐") || strings.Contains(text, "来首歌") || strings.Contains(text, "唱首歌") || strings.Contains(text, "放首歌") {
+		log.Println("🎵 [指令] 播放音乐")
+		speakQwenFlashStream("好的，来听听这首歌。")
+		playMusic()
+		return true
+	}
+
+	// 停止指令
+	if strings.Contains(text, "别唱了") || strings.Contains(text, "关闭音乐") {
+		log.Println("🎵 [指令] 停止音乐")
+		stopMusic()
+		speakQwenFlashStream("已停止。")
+		return true
+	}
+
+	return false
+}
+
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
-	log.Println("=== RK3308 AI 助手 (V19.4 长文本修复版) ===")
+	log.Println("=== RK3308 AI 助手 (V20.0 Aplay-Lite 混音版) ===")
 
 	globalSessionID = generateSessionID()
 	log.Printf("✨ 会话ID: %s", globalSessionID)
@@ -104,7 +173,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("VAD Init 失败: %v", err)
 	}
-
 	vadEng.SetMode(3)
 
 	stopPlayChan = make(chan struct{}, 1)
@@ -129,10 +197,15 @@ func containsAny(text string, keywords []string) bool {
 }
 
 func performStop() {
+	// 1. 停 TTS
 	select {
 	case stopPlayChan <- struct{}{}:
 	default:
 	}
+
+	// 2. ★★★ 也要停音乐 ★★★
+	stopMusic()
+
 	stateMutex.Lock()
 	currentState = STATE_LISTENING
 	stateMutex.Unlock()
@@ -147,12 +220,16 @@ func performExit() {
 		default:
 		}
 	}
+
+	stopMusic()
+
 	speakQwenFlashStream("再见")
 	log.Println("👋 进程自杀")
 	os.Exit(0)
 }
 
 func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
+	// 录音依然使用 hw:2,0 (VAD/Mic 设备)，这个不需要改 dmix
 	cmd := exec.Command("arecord", "-D", "hw:2,0", "-c", "10", "-r", "16000", "-f", "S16_LE", "-t", "raw", "--period-size=256", "--buffer-size=16384")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -225,6 +302,7 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 				}
 			}
 
+			// VAD 触发阈值 (300ms)
 			if vadSpeechCounter > 15 {
 				if !isSpeechTriggered {
 					if curr == STATE_SPEAKING || curr == STATE_THINKING {
@@ -232,6 +310,14 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 					} else {
 						log.Println("👂 [VAD] 开始录音...")
 					}
+
+					// ★★★ 核心避让逻辑 ★★★
+					// 人一开口，音乐就停。防止音乐声被录进去
+					if isMusicPlaying {
+						log.Println("🤫 监听到人声，暂停背景音乐")
+						stopMusic()
+					}
+
 					isSpeechTriggered = true
 				}
 			}
@@ -239,7 +325,6 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 			if isSpeechTriggered {
 				asrBuffer = append(asrBuffer, currentFrame...)
 
-				// 保持 18帧 (360ms) 的极速断句
 				if vadSilenceCounter > 18 && len(asrBuffer) > 16000*0.3 {
 
 					vadWaitDuration := time.Since(silenceStartTime)
@@ -287,20 +372,15 @@ func processInterruptionCheck(pcmDataInt16 []int16) {
 	if text == "" {
 		return
 	}
-
 	log.Printf("🕵️ [打断校验] 识别内容: [%s]", text)
 
 	if containsAny(text, EXIT_WORDS) {
-		log.Println("💀 [校验通过] 立即退出！")
 		performExit()
 		return
 	}
 
 	if containsAny(text, INTERRUPT_WORDS) {
-		log.Println("🛑 [校验通过] 暂停播放")
 		performStop()
-	} else {
-		log.Println("🛡️ [校验忽略] 继续播放")
 	}
 }
 
@@ -323,19 +403,26 @@ func processASR(pcmDataInt16 []int16) {
 	}
 	log.Printf("✅ 用户说: [%s]", text)
 
+	// 1. 退出
 	if containsAny(text, EXIT_WORDS) {
-		log.Println("💀 [指令熔断] 用户要求关闭")
 		performExit()
 		return
 	}
 
+	// 2. 暂停
 	if containsAny(text, INTERRUPT_WORDS) {
-		log.Println("🚫 [指令熔断] 用户要求暂停")
 		performStop()
 		speakQwenFlashStream("好的")
 		return
 	}
 
+	// 3. ★★★ 检查音乐意图 (优先处理) ★★★
+	if handleMusicIntent(text) {
+		setState(STATE_LISTENING)
+		return
+	}
+
+	// 4. 重置
 	if strings.Contains(text, "重置") || strings.Contains(text, "忘掉") {
 		globalSessionID = generateSessionID()
 		speakQwenFlashStream("记忆已重置")
@@ -393,7 +480,9 @@ func speakQwenFlashStream(text string) {
 	}
 	defer resp.Body.Close()
 
-	playCmd := exec.Command("aplay", "-D", "plughw:1,0", "-q", "-t", "raw", "-r", "24000", "-f", "S16_LE", "-c", "1")
+	// ★★★ 核心修改：TTS 播放也要走 default 设备 ★★★
+	// 这样 TTS 就会通过 dmix 与音乐混音，而不是报错
+	playCmd := exec.Command("aplay", "-D", "default", "-q", "-t", "raw", "-r", "24000", "-f", "S16_LE", "-c", "1")
 	playStdin, err := playCmd.StdinPipe()
 	if err != nil {
 		return
@@ -471,6 +560,7 @@ func speakQwenFlashStream(text string) {
 	}
 }
 
+// 保持原样
 func callASRWebSocket(pcmData []byte) string {
 	dialer := websocket.Dialer{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	headers := http.Header{}
@@ -535,6 +625,7 @@ func callASRWebSocket(pcmData []byte) string {
 	return finalText
 }
 
+// 保持原样
 func callAgent(prompt string) string {
 	url := "https://dashscope.aliyuncs.com/api/v1/apps/" + APP_ID + "/completion"
 
