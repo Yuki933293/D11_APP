@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 	vado "github.com/maxhawkins/go-webrtc-vad"
 
 	"ai_box/aec"
@@ -34,18 +35,23 @@ const APP_ID = "16356830643247938dfa31f8414fd58d"
 const WS_ASR_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 const TTS_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 
-// 音乐文件存放目录
 const MUSIC_DIR = "/userdata/music"
+const SESSION_TIMEOUT = 30 * time.Second
 
-// 优先级 1: 退出词 (杀进程)
-var EXIT_WORDS = []string{
-	"关闭系统", "关机", "退出程序", "再见", "退下", "拜拜", "结束对话", "结束程序", "关闭",
-}
+// 唤醒后冷却时间 (防止听到自己说话)
+const WAKE_COOLDOWN = 1500 * time.Millisecond
 
-// 优先级 2: 强行停止词 (停止 TTS 和 音乐)
-var INTERRUPT_WORDS = []string{
-	"闭嘴", "停止", "安静", "别说了", "别唱了", "关掉音乐", "停止播放", "等一下", "暂停",
-}
+// Sherpa 模型路径
+const (
+	KWS_TOKENS   = "./models/tokens.txt"
+	KWS_ENCODER  = "./models/encoder-epoch-12-avg-2-chunk-16-left-64.onnx"
+	KWS_DECODER  = "./models/decoder-epoch-12-avg-2-chunk-16-left-64.onnx"
+	KWS_JOINER   = "./models/joiner-epoch-12-avg-2-chunk-16-left-64.onnx"
+	KWS_KEYWORDS = "./keywords.txt"
+)
+
+var EXIT_WORDS = []string{"关闭系统", "关机", "退出程序", "再见", "退下", "拜拜", "结束对话", "结束程序", "关闭"}
+var INTERRUPT_WORDS = []string{"闭嘴", "停止", "安静", "别说了", "别唱了", "关掉音乐", "停止播放", "等一下", "暂停"}
 
 type AppState int
 
@@ -63,64 +69,84 @@ var (
 	isExiting       bool
 	globalSessionID string
 
-	// --- 音乐控制 (内存混音) ---
+	// --- 唤醒状态 ---
+	isAwake        bool = false
+	lastActiveTime time.Time
+	wakeUpTime     time.Time
+	statusMutex    sync.Mutex
+	kwsSpotter     *sherpa.KeywordSpotter
+
+	// --- 音乐 ---
 	musicCmd       *exec.Cmd
 	musicStdin     io.WriteCloser
 	musicMutex     sync.Mutex
 	isMusicPlaying bool
-	targetVolume   float64 = 1.0 // 目标音量 (1.0 = 100%, 0.2 = 20%)
-	currentVolume  float64 = 1.0 // 当前平滑音量
+	targetVolume   float64 = 1.0
+	currentVolume  float64 = 1.0
 	volMutex       sync.Mutex
 	stopMusicChan  chan struct{}
 
-	// --- TTS 控制 (防重叠) ---
+	// --- TTS ---
 	ttsCmd   *exec.Cmd
 	ttsMutex sync.Mutex
 )
 
 func init() {
-	// 配置 HTTP Client (跳过 SSL 验证以加速)
 	tr := &http.Transport{
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
-		DisableKeepAlives:   false,
 		DialContext: (&net.Dialer{
 			Timeout:   5 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		TLSHandshakeTimeout:   5 * time.Second,
-		ResponseHeaderTimeout: 5 * time.Second,
 	}
 	insecureClient = &http.Client{Transport: tr, Timeout: 0}
-
 	rand.Seed(time.Now().UnixNano())
 }
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
-	log.Println("=== RK3308 AI 助手 (V24.0 最终版) ===")
+	log.Println("=== RK3308 AI 助手 (V70.0 修复反馈版) ===")
 
 	globalSessionID = generateSessionID()
 	log.Printf("✨ 会话ID: %s", globalSessionID)
 
-	// 1. 初始化回声消除 (AEC)
-	aecProc := aec.NewProcessor()
+	log.Println("🚀 [1/3] 加载唤醒模型...")
+	featConfig := sherpa.FeatureConfig{SampleRate: 16000, FeatureDim: 80}
+	modelConfig := sherpa.OnlineModelConfig{
+		Transducer: sherpa.OnlineTransducerModelConfig{
+			Encoder: KWS_ENCODER, Decoder: KWS_DECODER, Joiner: KWS_JOINER,
+		},
+		Tokens:     KWS_TOKENS,
+		NumThreads: 1,
+		Provider:   "cpu",
+		ModelType:  "zipformer2",
+	}
+	kwsConfig := sherpa.KeywordSpotterConfig{
+		FeatConfig:   featConfig,
+		ModelConfig:  modelConfig,
+		KeywordsFile: KWS_KEYWORDS,
+	}
+	kwsSpotter = sherpa.NewKeywordSpotter(&kwsConfig)
+	if kwsSpotter == nil {
+		log.Fatal("❌ Sherpa加载失败")
+	}
+	log.Println("✅ [2/3] 唤醒引擎就绪")
 
-	// 2. 初始化 VAD
+	aecProc := aec.NewProcessor()
 	vadEng, err := vado.New()
 	if err != nil {
-		log.Fatalf("VAD Init 失败: %v", err)
+		log.Fatal(err)
 	}
-	vadEng.SetMode(3) // 激进模式
+	vadEng.SetMode(2)
 
 	stopPlayChan = make(chan struct{}, 1)
 
-	// 3. 启动音频采集循环
-	go audioLoop(aecProc, vadEng)
+	go timeoutCheckLoop()
+	log.Println("✅ [3/3] 系统启动完成，待机中... (请喊 '小瑞')")
+	audioLoop(aecProc, vadEng)
 
-	// 阻塞主进程
 	select {}
 }
 
@@ -128,7 +154,45 @@ func generateSessionID() string {
 	return fmt.Sprintf("session-%d-%d", time.Now().Unix(), rand.Intn(10000))
 }
 
-// ================= 1. 音乐播放与软闪避 (内存混音) =================
+func updateActiveTime() {
+	statusMutex.Lock()
+	lastActiveTime = time.Now()
+	statusMutex.Unlock()
+}
+
+func timeoutCheckLoop() {
+	ticker := time.NewTicker(1 * time.Second)
+	for range ticker.C {
+		statusMutex.Lock()
+		musicMutex.Lock()
+		playing := isMusicPlaying
+		musicMutex.Unlock()
+
+		if isAwake && !playing && time.Since(lastActiveTime) > SESSION_TIMEOUT {
+			log.Println("💤 [超时] 自动进入待机模式")
+			isAwake = false
+			go speakQwenFlashStream("小瑞先退下了")
+		}
+		statusMutex.Unlock()
+	}
+}
+
+// 核心唤醒逻辑
+func performWakeUp() {
+	log.Println("✨ 【触发唤醒】")
+	stopTTS()
+	duckMusic()
+
+	statusMutex.Lock()
+	isAwake = true
+	lastActiveTime = time.Now()
+	wakeUpTime = time.Now()
+	statusMutex.Unlock()
+
+	go speakQwenFlashStream("我在")
+}
+
+// ================= 音乐控制 =================
 
 func setTargetVolume(vol float64) {
 	volMutex.Lock()
@@ -140,11 +204,8 @@ func duckMusic() {
 	musicMutex.Lock()
 	playing := isMusicPlaying
 	musicMutex.Unlock()
-
 	if playing {
-		// Log 太多会刷屏，这里可以注释掉，或者保留用于调试
-		// log.Println("📉 [闪避] 降低音乐音量")
-		setTargetVolume(0.2) // 降到 20%
+		setTargetVolume(0.2)
 	}
 }
 
@@ -152,10 +213,9 @@ func unduckMusic() {
 	musicMutex.Lock()
 	playing := isMusicPlaying
 	musicMutex.Unlock()
-
 	if playing {
 		log.Println("📈 [恢复] 恢复音乐音量")
-		setTargetVolume(1.0) // 恢复 100%
+		setTargetVolume(1.0)
 	}
 }
 
@@ -163,40 +223,26 @@ func playMusicFile(path string) bool {
 	musicMutex.Lock()
 	defer musicMutex.Unlock()
 
-	// ================= 1. 严密的清理逻辑 =================
 	if isMusicPlaying {
-		// 发送停止信号 (通知旧的 Goroutine 停止写入)
 		select {
 		case stopMusicChan <- struct{}{}:
 		default:
 		}
-
-		// 主动关闭管道 (这是最快让 Goroutine 退出的方法)
 		if musicStdin != nil {
 			musicStdin.Close()
 		}
-
-		// 强制杀掉旧进程
 		if musicCmd != nil && musicCmd.Process != nil {
 			musicCmd.Process.Kill()
-			// 必须等待僵尸进程彻底回收
 			_ = musicCmd.Wait()
 		}
-
-		// 稍微延时，确保 ALSA 缓冲区排空
 		time.Sleep(100 * time.Millisecond)
 	}
-	// ====================================================
 
-	// 打开新文件
 	file, err := os.Open(path)
 	if err != nil {
-		log.Printf("❌ 无法打开文件: %v", err)
 		return false
 	}
 
-	// 启动 aplay
-	// 注意：使用 default 设备
 	cmd := exec.Command("aplay", "-D", "default", "-q", "-t", "raw", "-r", "16000", "-c", "1", "-f", "S16_LE")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -208,99 +254,63 @@ func playMusicFile(path string) bool {
 		return false
 	}
 
-	// 更新全局状态
-	musicCmd = cmd                         // 更新全局指针
-	musicStdin = stdin                     // 更新全局管道
-	isMusicPlaying = true                  // 标记正在播放
-	stopMusicChan = make(chan struct{}, 1) //以此建立新的信号通道
-
-	// 重置音量
+	musicCmd = cmd
+	musicStdin = stdin
+	isMusicPlaying = true
+	stopMusicChan = make(chan struct{}, 1)
 	setTargetVolume(1.0)
 	currentVolume = 1.0
 
 	log.Printf("🎵 正在播放: %s", filepath.Base(path))
 
-	// ================= 2. 聪明的 Goroutine =================
-	// ★ 关键修改：把 cmd 作为参数传进去，让协程认准自己的“主人”
 	go func(f *os.File, pipe io.WriteCloser, myCmd *exec.Cmd) {
 		defer f.Close()
 		defer pipe.Close()
-
-		f.Seek(44, 0) // 跳过 WAV 头
-
+		f.Seek(44, 0)
 		buf := make([]byte, 1024)
 		int16Buf := make([]int16, 512)
 
 		for {
-			// 检查停止信号
 			select {
 			case <-stopMusicChan:
-				// ★ 核心点：如果是被信号打断的，直接 return，不要改 isMusicPlaying！
 				return
 			default:
 			}
-
 			n, err := f.Read(buf)
 			if err != nil {
-				// EOF (自然播完) 或者文件错误
 				break
 			}
 
-			// --- 音量处理 (保持不变) ---
 			volMutex.Lock()
 			target := targetVolume
 			volMutex.Unlock()
 
-			step := 0.05
 			if currentVolume < target {
-				currentVolume += step
-				if currentVolume > target {
-					currentVolume = target
-				}
+				currentVolume += 0.05
 			} else if currentVolume > target {
-				currentVolume -= step
-				if currentVolume < target {
-					currentVolume = target
-				}
+				currentVolume -= 0.05
 			}
 
 			count := n / 2
 			for i := 0; i < count; i++ {
 				sample := int16(binary.LittleEndian.Uint16(buf[i*2 : i*2+2]))
-				scaled := int16(float64(sample) * currentVolume)
-				int16Buf[i] = scaled
+				int16Buf[i] = int16(float64(sample) * currentVolume)
 			}
-
 			for i := 0; i < count; i++ {
 				binary.LittleEndian.PutUint16(buf[i*2:], uint16(int16Buf[i]))
 			}
-
 			_, wErr := pipe.Write(buf[:n])
 			if wErr != nil {
-				// 管道断裂（通常是因为外部 close 了管道），视为被打断
 				return
 			}
 		}
-
-		// ================= 3. 安全的状态更新 =================
-		// 只有代码走到这里，才说明是“自然播完”的
-
 		musicMutex.Lock()
 		defer musicMutex.Unlock()
-
-		// ★ 关键判断：只有当全局的 musicCmd 还是我自己时，才把 playing 设为 false
-		// 如果主线程已经切歌了，musicCmd 会指向新歌，我就不能乱改状态了
 		if isMusicPlaying && musicCmd == myCmd {
 			isMusicPlaying = false
-			log.Println("🎵 播放自然结束")
-
-			// 顺便回收一下进程资源
-			go func() {
-				myCmd.Wait()
-			}()
+			go func() { myCmd.Wait() }()
 		}
-
-	}(file, stdin, cmd) // 将 cmd 传入闭包
+	}(file, stdin, cmd)
 
 	return true
 }
@@ -308,42 +318,29 @@ func playMusicFile(path string) bool {
 func stopMusic() {
 	musicMutex.Lock()
 	defer musicMutex.Unlock()
-
 	if isMusicPlaying {
 		log.Println("🛑 停止背景音乐")
-
-		// 1. 发信号 (通知 Goroutine 赶紧退，别改状态)
 		select {
 		case stopMusicChan <- struct{}{}:
 		default:
 		}
-
-		// 2. 关管道 (物理切断)
 		if musicStdin != nil {
 			musicStdin.Close()
 		}
-
-		// 3. 杀进程 (物理超度)
 		if musicCmd != nil && musicCmd.Process != nil {
 			musicCmd.Process.Kill()
-			_ = musicCmd.Wait() // 必须等它死透
+			_ = musicCmd.Wait()
 		}
-
-		// 4. 更新状态
 		isMusicPlaying = false
 		musicCmd = nil
 		musicStdin = nil
 	}
 }
 
-// 搜索并播放 (支持空格分词搜索 + 随机)
 func searchAndPlay(keyword string) (bool, string) {
 	var candidates []string
 	log.Printf("🔍 正在搜索: [%s]", keyword)
-
-	// 预处理关键词：按空格拆分
 	subKeywords := strings.Fields(keyword)
-
 	filepath.WalkDir(MUSIC_DIR, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
@@ -351,14 +348,10 @@ func searchAndPlay(keyword string) (bool, string) {
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".wav") {
 			return nil
 		}
-
-		// 模式 A: 随机播放 (keyword为空)
 		if keyword == "" {
 			candidates = append(candidates, path)
 			return nil
 		}
-
-		// 模式 B: 精准/模糊搜索
 		filenameLower := strings.ToLower(d.Name())
 		allMatch := true
 		for _, k := range subKeywords {
@@ -376,26 +369,18 @@ func searchAndPlay(keyword string) (bool, string) {
 	if len(candidates) == 0 {
 		return false, ""
 	}
-
-	// 随机挑一首
 	target := candidates[rand.Intn(len(candidates))]
 	success := playMusicFile(target)
-
-	baseName := filepath.Base(target)
-	songName := strings.TrimSuffix(baseName, filepath.Ext(baseName))
-
-	return success, songName
+	return success, strings.TrimSuffix(filepath.Base(target), filepath.Ext(filepath.Base(target)))
 }
 
-// ================= 2. TTS 控制 (解决双重说话) =================
+// ================= TTS 控制 (Qwen Flash Stream 修复版) =================
 
 func stopTTS() {
 	ttsMutex.Lock()
 	defer ttsMutex.Unlock()
-
 	if ttsCmd != nil && ttsCmd.Process != nil {
 		if ttsCmd.ProcessState == nil || !ttsCmd.ProcessState.Exited() {
-			// log.Println("🔇 [TTS] 强制扼杀旧的说话进程") // 调试时可开
 			ttsCmd.Process.Kill()
 			ttsCmd.Wait()
 		}
@@ -404,16 +389,17 @@ func stopTTS() {
 }
 
 func speakQwenFlashStream(text string) {
-	// ★ 1. 杀掉上一次还没说完的话
 	stopTTS()
-
 	select {
 	case <-stopPlayChan:
 	default:
 	}
 
+	log.Printf("🔊 [TTS] 准备播放: %s", text) // ★ 显影
+	setState(STATE_SPEAKING)
+
 	payload := map[string]interface{}{
-		"model":      "qwen3-tts-flash-2025-11-27",
+		"model":      "qwen-tts",
 		"input":      map[string]interface{}{"text": text, "voice": "Cherry", "language_type": "Chinese"},
 		"parameters": map[string]interface{}{"stream": true, "format": "pcm", "sample_rate": 24000},
 	}
@@ -426,26 +412,37 @@ func speakQwenFlashStream(text string) {
 
 	resp, err := insecureClient.Do(req)
 	if err != nil {
+		log.Printf("❌ [TTS] 网络请求失败: %v", err)
+		setState(STATE_LISTENING)
 		return
 	}
 	defer resp.Body.Close()
 
-	// 启动 aplay
-	cmd := exec.Command("aplay", "-D", "default", "-q", "-t", "raw", "-r", "24000", "-f", "S16_LE", "-c", "1")
-	playStdin, err := cmd.StdinPipe()
-	if err != nil {
-		return
-	}
-	if err := cmd.Start(); err != nil {
+	// ★★★ 核心修复：检查 HTTP 状态码 ★★★
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("❌ [TTS] 服务端报错 (Code %d): %s", resp.StatusCode, string(body))
+		setState(STATE_LISTENING)
 		return
 	}
 
-	// ★ 2. 登记全局变量
+	cmd := exec.Command("aplay", "-D", "default", "-q", "-t", "raw", "-r", "24000", "-f", "S16_LE", "-c", "1")
+	playStdin, err := cmd.StdinPipe()
+	if err != nil {
+		log.Printf("❌ [TTS] aplay启动失败: %v", err)
+		setState(STATE_LISTENING)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		log.Printf("❌ [TTS] aplay执行失败: %v", err)
+		setState(STATE_LISTENING)
+		return
+	}
+
 	ttsMutex.Lock()
 	ttsCmd = cmd
 	ttsMutex.Unlock()
 
-	// 异步清理
 	go func(c *exec.Cmd) {
 		c.Wait()
 		ttsMutex.Lock()
@@ -453,6 +450,12 @@ func speakQwenFlashStream(text string) {
 			ttsCmd = nil
 		}
 		ttsMutex.Unlock()
+
+		stateMutex.Lock()
+		if currentState == STATE_SPEAKING {
+			currentState = STATE_LISTENING
+		}
+		stateMutex.Unlock()
 	}(cmd)
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -460,18 +463,12 @@ func speakQwenFlashStream(text string) {
 	scanner.Buffer(buf, 1024*1024)
 
 	for scanner.Scan() {
-		// 检查打断
 		select {
 		case <-stopPlayChan:
 			cmd.Process.Kill()
 			return
 		default:
 		}
-		// 检查是否被外部 Kill
-		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
-			return
-		}
-
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data:") {
 			continue
@@ -480,6 +477,7 @@ func speakQwenFlashStream(text string) {
 		if strings.TrimSpace(dataStr) == "[DONE]" {
 			break
 		}
+
 		var chunk struct {
 			Output struct {
 				Audio struct {
@@ -498,21 +496,18 @@ func speakQwenFlashStream(text string) {
 		}
 	}
 	playStdin.Close()
+	updateActiveTime()
 }
 
-// ================= 3. 核心逻辑 (ASR & 意图路由) =================
+// ================= 核心逻辑 =================
 
 func performStop() {
-	// 发送软信号
 	select {
 	case stopPlayChan <- struct{}{}:
 	default:
 	}
-	// ★ 强力停止 TTS
 	stopTTS()
-	// 停止音乐
 	stopMusic()
-
 	stateMutex.Lock()
 	currentState = STATE_LISTENING
 	stateMutex.Unlock()
@@ -547,8 +542,8 @@ func processASR(pcmDataInt16 []int16) {
 		return
 	}
 	log.Printf("✅ 用户说: [%s]", text)
+	updateActiveTime()
 
-	// --- 1. 优先处理硬指令 ---
 	if containsAny(text, EXIT_WORDS) {
 		performExit()
 		return
@@ -560,15 +555,25 @@ func processASR(pcmDataInt16 []int16) {
 		return
 	}
 
-	// --- 2. 智能决策 ---
+	curr := getState()
+	musicMutex.Lock()
+	playing := isMusicPlaying
+	musicMutex.Unlock()
+	if curr == STATE_SPEAKING && !playing {
+		log.Println("⚠️ [Busy] 正在说话，忽略普通指令")
+		return
+	}
+
 	systemPrompt := `你是一个智能音箱助手。
 1. 用户想听歌/随机播放 (如"放首歌","听周杰伦","来首稻香") -> {"action":"play","keyword":"搜索词","reply":"好的..."}。如果未指定歌名keyword设为空。
 2. 用户想聊天 -> {"action":"chat","reply":"回复内容"}。
 3. 只返回JSON，不要Markdown。`
 
 	fullPrompt := systemPrompt + "\n用户输入：" + text
-
 	jsonResponse := callAgent(fullPrompt)
+
+	// ★ V70: 恢复 LLM 日志，方便调试
+	log.Printf("🤖 [LLM回复] %s", jsonResponse)
 	logCost("LLM决策", time.Since(pipelineStart))
 
 	jsonResponse = strings.Trim(jsonResponse, "```json")
@@ -579,29 +584,22 @@ func processASR(pcmDataInt16 []int16) {
 		Keyword string `json:"keyword"`
 		Reply   string `json:"reply"`
 	}
-
 	err := json.Unmarshal([]byte(jsonResponse), &intent)
 
-	stateMutex.Lock()
-	currentState = STATE_SPEAKING
-	stateMutex.Unlock()
-
-	musicMutex.Lock()
-	playing := isMusicPlaying
-	musicMutex.Unlock()
-
 	if err != nil {
-		// 解析失败
 		if playing {
 			log.Println("🤫 [音乐模式] 解析失败，保持安静")
 			unduckMusic()
 		} else {
-			log.Println("⚠️ LLM JSON解析失败，回落为普通回复")
-			speakQwenFlashStream(jsonResponse)
+			speakQwenFlashStream(jsonResponse) // 朗读原始内容
 		}
 	} else {
 		if intent.Action == "play" {
-			// 点歌：任何时候都响应
+			// ★ V70: 模糊词处理
+			if intent.Keyword == "音乐" || intent.Keyword == "歌曲" || intent.Keyword == "歌" {
+				intent.Keyword = "" // 转为随机播放
+			}
+
 			speakQwenFlashStream(intent.Reply)
 			success, songName := searchAndPlay(intent.Keyword)
 			if !success {
@@ -610,7 +608,6 @@ func processASR(pcmDataInt16 []int16) {
 				log.Printf("🎵 即将播放: %s", songName)
 			}
 		} else {
-			// 闲聊：只有没放歌时才响应 (高冷模式)
 			if playing {
 				log.Printf("🤫 [音乐模式] 识别为闲聊(%s)，主动忽略", intent.Reply)
 				unduckMusic()
@@ -620,12 +617,6 @@ func processASR(pcmDataInt16 []int16) {
 			}
 		}
 	}
-
-	stateMutex.Lock()
-	if currentState == STATE_SPEAKING && !isExiting {
-		currentState = STATE_LISTENING
-	}
-	stateMutex.Unlock()
 }
 
 func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
@@ -638,6 +629,9 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 		log.Fatal(err)
 	}
 	log.Println("🎤 麦克风已开启...")
+
+	kwsStream := sherpa.NewKeywordStream(kwsSpotter)
+	floatBuffer := make([]float32, 256)
 
 	const HARDWARE_FRAME_SIZE = 256
 	readBuf := make([]byte, HARDWARE_FRAME_SIZE*10*2)
@@ -658,14 +652,54 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 		if err != nil {
 			break
 		}
+
 		rawInt16 := make([]int16, HARDWARE_FRAME_SIZE*10)
 		for i := 0; i < len(rawInt16); i++ {
 			rawInt16[i] = int16(binary.LittleEndian.Uint16(readBuf[i*2 : i*2+2]))
 		}
+
 		cleanAudioChunk, _ := aecProc.Process(rawInt16)
 		if cleanAudioChunk == nil {
 			continue
 		}
+
+		// KWS
+		for i, v := range cleanAudioChunk {
+			floatBuffer[i] = float32(v) / 32768.0
+		}
+		kwsStream.AcceptWaveform(16000, floatBuffer)
+
+		if kwsSpotter.IsReady(kwsStream) {
+			kwsSpotter.Decode(kwsStream)
+			keyword := kwsSpotter.GetResult(kwsStream).Keyword
+			if keyword != "" {
+				if strings.Contains(keyword, "iǎo") || strings.Contains(keyword, "uì") {
+					performWakeUp()
+					vadSpeechCounter = 0
+					vadSilenceCounter = 0
+					isSpeechTriggered = false
+					asrBuffer = nil
+					kwsStream = sherpa.NewKeywordStream(kwsSpotter)
+					continue
+				}
+			}
+		}
+
+		statusMutex.Lock()
+		awake := isAwake
+		inCooldown := time.Since(wakeUpTime) < WAKE_COOLDOWN
+		statusMutex.Unlock()
+
+		if !awake {
+			asrBuffer = nil
+			continue
+		}
+		if inCooldown {
+			asrBuffer = nil
+			continue
+		}
+
+		// VAD
 		vadAccumulator = append(vadAccumulator, cleanAudioChunk...)
 
 		for len(vadAccumulator) >= VAD_FRAME_SAMPLES {
@@ -684,11 +718,10 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 				vadSpeechCounter = 0
 			}
 
-			// VAD 触发 (Ducking Trigger)
 			if vadSpeechCounter > 15 {
 				if !isSpeechTriggered {
 					log.Println("👂 [VAD] 检测到说话...")
-					duckMusic() // 立即降低音量
+					duckMusic()
 					isSpeechTriggered = true
 				}
 			}
@@ -704,7 +737,6 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 					go processASR(bufferCopy)
 				}
 			} else {
-				// 保持一定的缓冲区
 				if len(asrBuffer) > 16000/2 {
 					asrBuffer = asrBuffer[VAD_FRAME_SAMPLES:]
 					asrBuffer = append(asrBuffer, currentFrame...)
@@ -735,6 +767,12 @@ func setState(s AppState) {
 	stateMutex.Lock()
 	defer stateMutex.Unlock()
 	currentState = s
+}
+
+func getState() AppState {
+	stateMutex.Lock()
+	defer stateMutex.Unlock()
+	return currentState
 }
 
 func callASRWebSocket(pcmData []byte) string {
@@ -804,10 +842,7 @@ func callASRWebSocket(pcmData []byte) string {
 func callAgent(prompt string) string {
 	url := "https://dashscope.aliyuncs.com/api/v1/apps/" + APP_ID + "/completion"
 	payload := map[string]interface{}{
-		"input": map[string]string{
-			"prompt":     prompt,
-			"session_id": globalSessionID,
-		},
+		"input":      map[string]string{"prompt": prompt, "session_id": globalSessionID},
 		"parameters": map[string]interface{}{"enable_thinking": false, "enable_search": false},
 		"debug":      false,
 	}
