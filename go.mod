@@ -11,6 +11,9 @@ require (
 )
 
 require (
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/gordonklaus/portaudio v0.0.0-20250206071425-98a94950218b // indirect
+	github.com/hajimehoshi/go-mp3 v0.3.4 // indirect
 	github.com/k2-fsa/sherpa-onnx-go-linux v1.12.20 // indirect
 	github.com/k2-fsa/sherpa-onnx-go-macos v1.12.20 // indirect
 	github.com/k2-fsa/sherpa-onnx-go-windows v1.12.20 // indirect
