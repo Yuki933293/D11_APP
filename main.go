@@ -38,7 +38,7 @@ const WS_ASR_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 
 const MUSIC_DIR = "/userdata/music"
 
-var EXIT_WORDS = []string{"关闭系统", "关机", "退出程序", "再见", "退下", "拜拜"}
+var EXIT_WORDS = []string{"关闭系统", "关机", "退出程序", "再见", "退下", "拜拜", "结束吧", "结束程序", "停止运行", "关闭助手", "关闭"}
 var INTERRUPT_WORDS = []string{"闭嘴", "停止", "安静", "别说了", "暂停", "打断", "别唱了", "等一下"}
 
 type AppState int
@@ -97,7 +97,7 @@ func init() {
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
-	log.Println("=== RK3308 AI 助手 (V160.0 拦截复位修复版) ===")
+	log.Println("=== RK3308 AI 助手 (V160.1 首句抢跑优化版) ===")
 
 	exec.Command("amixer", "-c", "2", "sset", "Master", "100%", "unmute").Run()
 	exec.Command("amixer", "-c", "2", "sset", "Playback", "100%", "unmute").Run()
@@ -224,7 +224,6 @@ func (m *MusicManager) PlayFile(path string) {
 		defer pipe.Close()
 		f.Seek(44, 0)
 		buf := make([]byte, 4096)
-		int16Buf := make([]int16, 2048)
 		for {
 			select {
 			case <-stopCh:
@@ -256,10 +255,7 @@ func (m *MusicManager) PlayFile(path string) {
 			for i := 0; i < count; i++ {
 				sample := int16(binary.LittleEndian.Uint16(buf[i*2 : i*2+2]))
 				scaled := int16(float64(sample) * m.currentVolume)
-				int16Buf[i] = scaled
-			}
-			for i := 0; i < count; i++ {
-				binary.LittleEndian.PutUint16(buf[i*2:], uint16(int16Buf[i]))
+				binary.LittleEndian.PutUint16(buf[i*2:], uint16(scaled))
 			}
 			if _, err := pipe.Write(buf[:n]); err != nil {
 				return
@@ -530,15 +526,16 @@ func ttsManagerLoop() {
 	}
 }
 
-// ================= LLM =================
+// ================= LLM (增加首句抢跑逻辑) =================
+// ================= LLM (V164.2 全程流式增量提交版) =================
 func callAgentStream(ctx context.Context, prompt string) {
 	flushChannel(ttsManagerChan)
 	tsLlmStart = time.Now()
 
+	// 1. 定义提示词和请求体
 	systemPrompt := "你是智能助手。仅在用户【明确要求播放音乐】（如“放首歌”、“听周杰伦”）时，才在回复末尾添加 [PLAY: 歌名]（随机播放用 [PLAY: RANDOM]）。" +
 		"如果用户要求停止，加上 [STOP]。" +
 		"回答天气、新闻、闲聊等普通问题时，【严禁】添加任何播放指令。"
-
 	payload := map[string]interface{}{
 		"model": "qwen-turbo",
 		"input": map[string]interface{}{
@@ -549,7 +546,10 @@ func callAgentStream(ctx context.Context, prompt string) {
 		},
 		"parameters": map[string]interface{}{"result_format": "text", "incremental_output": true},
 	}
+
 	jsonBody, _ := json.Marshal(payload)
+
+	// 2. 建立 HTTP 请求
 	req, _ := http.NewRequestWithContext(ctx, "POST", LLM_URL, bytes.NewReader(jsonBody))
 	req.Header.Set("Authorization", "Bearer "+DASH_API_KEY)
 	req.Header.Set("Content-Type", "application/json")
@@ -557,16 +557,17 @@ func callAgentStream(ctx context.Context, prompt string) {
 
 	resp, err := insecureClient.Do(req)
 	if err != nil {
-		// ★ 修复：请求失败，务必复位状态并恢复音量
 		musicMgr.Unduck()
 		setState(STATE_LISTENING)
 		return
 	}
 	defer resp.Body.Close()
 
+	// 3. 开始流式处理 LLM 吐出的内容
 	scanner := bufio.NewScanner(resp.Body)
 	var fullTextBuilder strings.Builder
-	var isFirstToken = true
+	var chunkBuffer strings.Builder // 持续积攒文字的缓冲区
+	var firstChunkSent = false
 
 	fmt.Print("📝 [LLM 推理]: ")
 
@@ -595,62 +596,62 @@ func callAgentStream(ctx context.Context, prompt string) {
 			if clean == "" {
 				continue
 			}
-			if isFirstToken {
-				tsLlmFirst = time.Now()
-				isFirstToken = false
-			}
 			fmt.Print(clean)
 			fullTextBuilder.WriteString(clean)
+			chunkBuffer.WriteString(clean)
+
+			// ★ 增量分段提交逻辑：
+			// 规则：遇到结尾标点，或者缓冲区内的文字超过 60 字节 (约20个汉字)
+			currentText := chunkBuffer.String()
+			shouldSend := false
+
+			// 针对首句做特殊加速处理
+			if !firstChunkSent {
+				if strings.ContainsAny(clean, "，。！？,.!?\n") || chunkBuffer.Len() > 30 {
+					shouldSend = true
+					firstChunkSent = true
+				}
+			} else {
+				// 后续句子遇到标点就发，保证流式顺畅
+				if strings.ContainsAny(clean, "，。！？,.!?\n") || chunkBuffer.Len() > 80 {
+					shouldSend = true
+				}
+			}
+
+			if shouldSend {
+				// 提取指令（过滤掉 [PLAY:] 等内容），避免指令被 TTS 读出来
+				textToTTS := regexp.MustCompile(`\[.*?\]`).ReplaceAllString(currentText, "")
+				textToTTS = strings.TrimSpace(textToTTS)
+
+				if textToTTS != "" {
+					ttsManagerChan <- textToTTS
+					chunkBuffer.Reset() // 提交后清空，准备接下一段
+				}
+			}
 		}
 	}
 	fmt.Println()
 	log.Printf("⏱️ [性能] LLM 总耗时: %v", time.Since(tsLlmStart))
 
-	fullText := fullTextBuilder.String()
-	hasCommand := false
-
-	if strings.Contains(fullText, "[STOP]") {
-		log.Println("🎵 [CMD] 停止播放")
-		musicMgr.Stop()
-		hasCommand = true
-		fullText = strings.ReplaceAll(fullText, "[STOP]", "")
+	// 4. 扫尾逻辑：发送缓冲区中最后剩余的文字
+	remainText := strings.TrimSpace(regexp.MustCompile(`\[.*?\]`).ReplaceAllString(chunkBuffer.String(), ""))
+	if remainText != "" {
+		ttsManagerChan <- remainText
 	}
 
+	// 5. 告知 TTS 这一轮任务结束
+	ttsManagerChan <- "[[END]]"
+
+	// 6. 处理指令（控制音乐播放等）
+	fullText := fullTextBuilder.String()
+	if strings.Contains(fullText, "[STOP]") {
+		musicMgr.Stop()
+	}
 	if strings.Contains(fullText, "[PLAY:") {
 		re := regexp.MustCompile(`\[PLAY:\s*(.*?)\]`)
-		matches := re.FindStringSubmatch(fullText)
-		if len(matches) > 1 {
-			songName := strings.TrimSpace(matches[1])
-			log.Printf("🎵 [CMD] 播放请求: %s", songName)
-			found := musicMgr.SearchAndPlay(songName)
-			if found {
-				hasCommand = true
-			} else {
-				log.Println("⚠️ 搜歌失败，允许 TTS 播报")
-			}
+		if matches := re.FindStringSubmatch(fullText); len(matches) > 1 {
+			musicMgr.SearchAndPlay(strings.TrimSpace(matches[1]))
 		}
-		fullText = re.ReplaceAllString(fullText, "")
-	}
-
-	cleanTTS := strings.TrimSpace(fullText)
-
-	if musicMgr.IsPlaying() && !hasCommand {
-		log.Printf("🚫 [互斥拦截]: 音乐播放中，忽略 TTS -> [%s]", cleanTTS)
-		musicMgr.Unduck()
-		// ★★★ 核心修复：拦截后，必须手动重置状态，否则死锁 ★★★
-		setState(STATE_LISTENING)
-		return
-	}
-
-	if cleanTTS != "" {
-		log.Printf("🔊 [TTS 提交]: %s", cleanTTS)
-		ttsManagerChan <- fullText
-		time.Sleep(50 * time.Millisecond)
-		ttsManagerChan <- "[[END]]"
-	} else {
-		log.Println("✅ [LLM] 无 TTS 内容，直接复位状态")
-		setState(STATE_LISTENING)
-		// 如果是纯指令（如停止/切歌），可以视情况 Unduck 或保持（切歌会自动处理）
 	}
 }
 
