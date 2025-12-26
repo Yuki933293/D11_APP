@@ -29,39 +29,28 @@ import (
 	"ai_box/aec"
 )
 
-// ================= 配置区 =================
+// ================= 1. 常量配置 =================
 const DASH_API_KEY = "sk-fb64515c017945fc9282f9ace355cad3"
 
 const TTS_WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 const LLM_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-const WS_ASR_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
+const WS_AS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 
 const MUSIC_DIR = "/userdata/music"
 
-var EXIT_WORDS = []string{"关闭系统", "关机", "退出程序", "再见", "退下", "拜拜", "结束吧", "结束程序", "停止运行", "关闭助手", "关闭"}
-var INTERRUPT_WORDS = []string{"闭嘴", "停止", "安静", "别说了", "暂停", "打断", "别唱了", "等一下"}
+// ================= 2. 双级打断词库 =================
+var EXIT_WORDS = []string{
+	"关闭系统", "关机", "退出程序", "再见", "退下",
+	"拜拜", "结束吧", "结束程序", "停止运行", "关闭助手", "关闭",
+}
 
-type AppState int
+var INTERRUPT_WORDS = []string{
+	"闭嘴", "停止", "安静", "别说了", "暂停", "打断",
+	"别唱了", "等一下", "换首歌", "下一首", "切歌", "不要说了",
+}
 
-const (
-	STATE_LISTENING AppState = iota
-	STATE_THINKING
-	STATE_SPEAKING
-)
-
+// ================= 3. 并发控制与状态变量 =================
 var (
-	tsVadEnd     time.Time
-	tsAsrEnd     time.Time
-	tsLlmStart   time.Time
-	tsLlmFirst   time.Time
-	tsTtsStart   time.Time
-	tsFirstAudio time.Time
-)
-
-var (
-	currentState AppState = STATE_LISTENING
-	stateMutex   sync.Mutex
-
 	sessionCtx    context.Context
 	sessionCancel context.CancelFunc
 	ctxMutex      sync.Mutex
@@ -73,13 +62,21 @@ var (
 
 	ttsManagerChan chan string
 	audioPcmChan   chan []byte
-	playerStdin    io.WriteCloser
-	playerCmd      *exec.Cmd
-	playerMutex    sync.Mutex
+
+	playerStdin io.WriteCloser
+	playerCmd   *exec.Cmd
+	playerMutex sync.Mutex
 
 	emojiRegex *regexp.Regexp
+	musicPunct = regexp.MustCompile(`[，。！？,.!?\s；;：:“”"'《》()（）【】\[\]、]`)
+	musicMgr   *MusicManager
+)
 
-	musicMgr *MusicManager
+// ================= 4. 性能监控辅助变量 =================
+var (
+	tsLlmStart   time.Time
+	tsTtsStart   time.Time
+	tsFirstAudio time.Time
 )
 
 func init() {
@@ -97,11 +94,7 @@ func init() {
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
-	log.Println("=== RK3308 AI 助手 (V160.1 首句抢跑优化版) ===")
-
-	exec.Command("amixer", "-c", "2", "sset", "Master", "100%", "unmute").Run()
-	exec.Command("amixer", "-c", "2", "sset", "Playback", "100%", "unmute").Run()
-	exec.Command("amixer", "-c", "2", "sset", "Capture", "100%", "unmute").Run()
+	log.Println("=== RK3308 AI 助手 (V160.21 物理资源锁定版) ===")
 
 	ttsManagerChan = make(chan string, 500)
 	audioPcmChan = make(chan []byte, 4000)
@@ -127,6 +120,24 @@ func main() {
 }
 
 func cleanText(text string) string { return strings.TrimSpace(emojiRegex.ReplaceAllString(text, "")) }
+
+func isExit(text string) bool {
+	for _, w := range EXIT_WORDS {
+		if strings.Contains(text, w) {
+			return true
+		}
+	}
+	return false
+}
+
+func isInterrupt(text string) bool {
+	for _, w := range INTERRUPT_WORDS {
+		if strings.Contains(text, w) {
+			return true
+		}
+	}
+	return false
+}
 
 // ================= 🎵 音乐管理器 =================
 type MusicManager struct {
@@ -161,6 +172,7 @@ func (m *MusicManager) Duck() {
 		m.setTargetVolume(0.2)
 	}
 }
+
 func (m *MusicManager) Unduck() {
 	if m.IsPlaying() {
 		m.setTargetVolume(1.0)
@@ -264,7 +276,6 @@ func (m *MusicManager) PlayFile(path string) {
 		m.mu.Lock()
 		if m.isPlaying && m.cmd == myCmd {
 			m.isPlaying = false
-			log.Println("🎵 [MUSIC] 自然结束")
 			go myCmd.Wait()
 		}
 		m.mu.Unlock()
@@ -304,13 +315,10 @@ func (m *MusicManager) SearchAndPlay(query string) bool {
 	return true
 }
 
-// ================= TTS 播放器 =================
 func audioPlayer() {
-	var cmd *exec.Cmd
-	var stdin io.WriteCloser
-
-	startPlayer := func() (*exec.Cmd, io.WriteCloser) {
-		c := exec.Command("aplay", "-D", "default", "-t", "raw", "-r", "22050", "-f", "S16_LE", "-c", "1", "-B", "100000")
+	doStart := func() (*exec.Cmd, io.WriteCloser) {
+		log.Println("🔍 [Audio-Link] 启动 aplay 物理进程...")
+		c := exec.Command("aplay", "-D", "default", "-t", "raw", "-r", "22050", "-f", "S16_LE", "-c", "1", "-B", "20000")
 		s, err := c.StdinPipe()
 		if err != nil {
 			return nil, nil
@@ -327,38 +335,41 @@ func audioPlayer() {
 
 	for pcmData := range audioPcmChan {
 		if len(pcmData) == 0 {
-			if stdin != nil {
-				stdin.Close()
+			log.Println("🔍 [Audio-Link] 收到数据结束标志，执行物理保活...")
+			time.Sleep(500 * time.Millisecond)
+			if playerStdin != nil {
+				playerStdin.Close()
 			}
-			if cmd != nil {
-				cmd.Wait()
+			if playerCmd != nil {
+				go func(c *exec.Cmd) {
+					if c != nil {
+						_ = c.Wait()
+					}
+					playerMutex.Lock()
+					playerCmd = nil
+					playerStdin = nil
+					playerMutex.Unlock()
+					log.Println("✅ [Audio-Link] 物理播报完成，系统解锁")
+				}(playerCmd)
 			}
-			log.Println("✅ [Audio] 物理播放结束，重置为监听")
-			setState(STATE_LISTENING)
-			cmd = nil
-			stdin = nil
 			continue
 		}
 
-		if stdin == nil {
-			cmd, stdin = startPlayer()
+		if playerStdin == nil {
+			doStart()
 		}
-		if stdin != nil {
-			if _, err := stdin.Write(pcmData); err != nil {
-				if cmd != nil && cmd.Process != nil {
-					cmd.Process.Kill()
-					cmd.Wait()
-				}
-				cmd, stdin = startPlayer()
-				if stdin != nil {
-					stdin.Write(pcmData)
-				}
+		if playerStdin != nil {
+			_, err := playerStdin.Write(pcmData)
+			if err != nil {
+				playerMutex.Lock()
+				playerCmd = nil
+				playerStdin = nil
+				playerMutex.Unlock()
 			}
 		}
 	}
 }
 
-// ================= TTS 管理器 =================
 func ttsManagerLoop() {
 	var conn *websocket.Conn
 	var wg sync.WaitGroup
@@ -404,20 +415,21 @@ func ttsManagerLoop() {
 				continue
 			}
 			header, _ := resp["header"].(map[string]interface{})
-			if header["event"] == "task-started" {
+			event := header["event"].(string)
+			if event == "task-started" {
 				select {
 				case taskStartedSignal <- struct{}{}:
 				default:
 				}
 			}
-			if header["event"] == "task-finished" || header["event"] == "task-failed" {
+			if event == "task-finished" || event == "task-failed" {
 				return
 			}
 		}
 	}
 
 	for {
-		firstChunk, ok := <-ttsManagerChan
+		msg, ok := <-ttsManagerChan
 		if !ok {
 			return
 		}
@@ -425,6 +437,7 @@ func ttsManagerLoop() {
 		sessionIDMutex.Lock()
 		globalID := currentSessionID
 		sessionIDMutex.Unlock()
+
 		if localSessionID != globalID {
 			if conn != nil {
 				conn.Close()
@@ -432,6 +445,7 @@ func ttsManagerLoop() {
 			}
 			localSessionID = globalID
 		}
+
 		if isCanceled() {
 			if conn != nil {
 				conn.Close()
@@ -440,32 +454,20 @@ func ttsManagerLoop() {
 			continue
 		}
 
-		var combinedText strings.Builder
-		if firstChunk != "[[END]]" {
-			combinedText.WriteString(firstChunk)
-		drainLoop:
-			for {
-				select {
-				case next := <-ttsManagerChan:
-					if next == "[[END]]" {
-						break drainLoop
-					}
-					combinedText.WriteString(next)
-				default:
-					break drainLoop
-				}
+		if msg == "[[END]]" {
+			if conn != nil {
+				conn.WriteJSON(map[string]interface{}{
+					"header":  map[string]interface{}{"task_id": currentTaskID, "action": "finish-task", "streaming": "duplex"},
+					"payload": map[string]interface{}{"input": map[string]interface{}{}},
+				})
+				wg.Wait()
+				conn.Close()
+				conn = nil
 			}
+			continue
 		}
 
-		textToSend := combinedText.String()
-		if textToSend != "" && strings.TrimSpace(textToSend) != "" {
-			if isCanceled() {
-				if conn != nil {
-					conn.Close()
-					conn = nil
-				}
-				continue
-			}
+		if strings.TrimSpace(msg) != "" {
 			if conn == nil {
 				dialer := websocket.Dialer{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 				headers := http.Header{}
@@ -478,24 +480,20 @@ func ttsManagerLoop() {
 				currentTaskID = uuid.New().String()
 				firstPacketReceived = false
 				tsTtsStart = time.Now()
-				select {
-				case <-taskStartedSignal:
-				default:
-				}
 				wg.Add(1)
 				go receiveLoop(conn)
 				conn.WriteJSON(map[string]interface{}{
 					"header": map[string]interface{}{"task_id": currentTaskID, "action": "run-task", "streaming": "duplex"},
 					"payload": map[string]interface{}{
 						"task_group": "audio", "task": "tts", "function": "SpeechSynthesizer",
-						"model":      "cosyvoice-clone-v1",
-						"parameters": map[string]interface{}{"text_type": "PlainText", "voice": "longxiaochun", "format": "pcm", "sample_rate": 22050, "volume": 50, "enable_ssml": false},
+						"model":      "cosyvoice-v2",
+						"parameters": map[string]interface{}{"text_type": "PlainText", "voice": "longhua_v2", "format": "pcm", "sample_rate": 22050, "volume": 50, "enable_ssml": false},
 						"input":      map[string]interface{}{},
 					},
 				})
 				select {
 				case <-taskStartedSignal:
-					time.Sleep(100 * time.Millisecond)
+					time.Sleep(50 * time.Millisecond)
 				case <-time.After(5 * time.Second):
 					conn.Close()
 					conn = nil
@@ -504,52 +502,43 @@ func ttsManagerLoop() {
 			}
 			conn.WriteJSON(map[string]interface{}{
 				"header":  map[string]interface{}{"task_id": currentTaskID, "action": "continue-task", "streaming": "duplex"},
-				"payload": map[string]interface{}{"input": map[string]interface{}{"text": textToSend}},
+				"payload": map[string]interface{}{"input": map[string]interface{}{"text": msg}},
 			})
-			time.Sleep(100 * time.Millisecond)
-		}
-
-		if conn != nil && (firstChunk == "[[END]]" || combinedText.Len() > 0) {
-			if firstChunk == "[[END]]" {
-				time.Sleep(500 * time.Millisecond)
-				if !isCanceled() {
-					conn.WriteJSON(map[string]interface{}{
-						"header":  map[string]interface{}{"task_id": currentTaskID, "action": "finish-task", "streaming": "duplex"},
-						"payload": map[string]interface{}{"input": map[string]interface{}{}},
-					})
-					wg.Wait()
-				}
-				conn.Close()
-				conn = nil
-			}
+			time.Sleep(50 * time.Millisecond)
 		}
 	}
 }
 
-// ================= LLM (增加首句抢跑逻辑) =================
-// ================= LLM (V164.2 全程流式增量提交版) =================
-func callAgentStream(ctx context.Context, prompt string) {
+func callAgentStream(ctx context.Context, prompt string, enableSearch bool) {
 	flushChannel(ttsManagerChan)
-	tsLlmStart = time.Now()
+	llmStart := time.Now()
 
-	// 1. 定义提示词和请求体
+	// 策略：联网搜索用 Max(准确但慢)，普通闲聊用 Turbo(极快)
+	modelName := "qwen-turbo"
+	if enableSearch {
+		modelName = "qwen-max"
+		log.Println("🌐 [LLM]: 检测到时效性需求，已动态开启联网搜索...")
+	}
+
 	systemPrompt := "你是智能助手。仅在用户【明确要求播放音乐】（如“放首歌”、“听周杰伦”）时，才在回复末尾添加 [PLAY: 歌名]（随机播放用 [PLAY: RANDOM]）。" +
 		"如果用户要求停止，加上 [STOP]。" +
 		"回答天气、新闻、闲聊等普通问题时，【严禁】添加任何播放指令。"
 	payload := map[string]interface{}{
-		"model": "qwen-turbo",
+		"model": modelName,
 		"input": map[string]interface{}{
 			"messages": []map[string]string{
 				{"role": "system", "content": systemPrompt},
 				{"role": "user", "content": prompt},
 			},
 		},
-		"parameters": map[string]interface{}{"result_format": "text", "incremental_output": true},
+		"parameters": map[string]interface{}{
+			"result_format":      "text",
+			"incremental_output": true,
+			"enable_search":      enableSearch, // 动态开关
+		},
 	}
 
 	jsonBody, _ := json.Marshal(payload)
-
-	// 2. 建立 HTTP 请求
 	req, _ := http.NewRequestWithContext(ctx, "POST", LLM_URL, bytes.NewReader(jsonBody))
 	req.Header.Set("Authorization", "Bearer "+DASH_API_KEY)
 	req.Header.Set("Content-Type", "application/json")
@@ -557,16 +546,15 @@ func callAgentStream(ctx context.Context, prompt string) {
 
 	resp, err := insecureClient.Do(req)
 	if err != nil {
+		log.Printf("❌ [LLM]: 请求失败: %v", err)
 		musicMgr.Unduck()
-		setState(STATE_LISTENING)
 		return
 	}
 	defer resp.Body.Close()
 
-	// 3. 开始流式处理 LLM 吐出的内容
 	scanner := bufio.NewScanner(resp.Body)
 	var fullTextBuilder strings.Builder
-	var chunkBuffer strings.Builder // 持续积攒文字的缓冲区
+	var chunkBuffer strings.Builder
 	var firstChunkSent = false
 
 	fmt.Print("📝 [LLM 推理]: ")
@@ -600,137 +588,141 @@ func callAgentStream(ctx context.Context, prompt string) {
 			fullTextBuilder.WriteString(clean)
 			chunkBuffer.WriteString(clean)
 
-			// ★ 增量分段提交逻辑：
-			// 规则：遇到结尾标点，或者缓冲区内的文字超过 60 字节 (约20个汉字)
-			currentText := chunkBuffer.String()
-			shouldSend := false
-
-			// 针对首句做特殊加速处理
-			if !firstChunkSent {
-				if strings.ContainsAny(clean, "，。！？,.!?\n") || chunkBuffer.Len() > 30 {
-					shouldSend = true
-					firstChunkSent = true
-				}
-			} else {
-				// 后续句子遇到标点就发，保证流式顺畅
-				if strings.ContainsAny(clean, "，。！？,.!?\n") || chunkBuffer.Len() > 80 {
-					shouldSend = true
-				}
+			// 动态调整首包断句阈值：联网搜索时降低阈值以减少用户焦虑
+			threshold := 30
+			if enableSearch {
+				threshold = 15 // 搜索时只要有15个字或标点就立刻播报
 			}
 
-			if shouldSend {
-				// 提取指令（过滤掉 [PLAY:] 等内容），避免指令被 TTS 读出来
-				textToTTS := regexp.MustCompile(`\[.*?\]`).ReplaceAllString(currentText, "")
-				textToTTS = strings.TrimSpace(textToTTS)
-
-				if textToTTS != "" {
-					ttsManagerChan <- textToTTS
-					chunkBuffer.Reset() // 提交后清空，准备接下一段
+			if !firstChunkSent {
+				if strings.ContainsAny(clean, "，。！？,.!?\n") || chunkBuffer.Len() > threshold {
+					firstChunkSent = true
+					sendChunk(&chunkBuffer)
+				}
+			} else {
+				if strings.ContainsAny(clean, "，。！？,.!?\n") || chunkBuffer.Len() > 80 {
+					sendChunk(&chunkBuffer)
 				}
 			}
 		}
 	}
 	fmt.Println()
-	log.Printf("⏱️ [性能] LLM 总耗时: %v", time.Since(tsLlmStart))
+	log.Printf("⏱️ [性能] LLM 推理结束，总耗时: %v", time.Since(llmStart))
 
-	// 4. 扫尾逻辑：发送缓冲区中最后剩余的文字
-	remainText := strings.TrimSpace(regexp.MustCompile(`\[.*?\]`).ReplaceAllString(chunkBuffer.String(), ""))
-	if remainText != "" {
-		ttsManagerChan <- remainText
-	}
-
-	// 5. 告知 TTS 这一轮任务结束
+	// 处理剩余文本
+	sendChunk(&chunkBuffer)
 	ttsManagerChan <- "[[END]]"
 
-	// 6. 处理指令（控制音乐播放等）
+	// 指令解析逻辑
 	fullText := fullTextBuilder.String()
 	if strings.Contains(fullText, "[STOP]") {
 		musicMgr.Stop()
 	}
-	if strings.Contains(fullText, "[PLAY:") {
-		re := regexp.MustCompile(`\[PLAY:\s*(.*?)\]`)
-		if matches := re.FindStringSubmatch(fullText); len(matches) > 1 {
-			musicMgr.SearchAndPlay(strings.TrimSpace(matches[1]))
-		}
+	if matches := regexp.MustCompile(`(?i)\[PLAY:\s*(.*?)\]`).FindStringSubmatch(fullText); len(matches) > 1 {
+		musicMgr.SearchAndPlay(strings.TrimSpace(matches[1]))
 	}
 }
 
-// ================= 打断 =================
+// 辅助函数：发送文本块到 TTS
+func sendChunk(buf *strings.Builder) {
+	text := regexp.MustCompile(`\[.*?\]`).ReplaceAllString(buf.String(), "")
+	if strings.TrimSpace(text) != "" {
+		ttsManagerChan <- strings.TrimSpace(text)
+	}
+	buf.Reset()
+}
+
 func performStop() {
-	log.Println("🛑 触发打断")
+	log.Println("🧹 [物理清理]: 强制切断所有声音源")
 	ctxMutex.Lock()
 	if sessionCancel != nil {
 		sessionCancel()
 	}
 	ctxMutex.Unlock()
+
 	flushChannel(ttsManagerChan)
 	flushChannel(audioPcmChan)
+
 	exec.Command("killall", "-9", "aplay").Run()
 	musicMgr.Stop()
-	setState(STATE_LISTENING)
+
+	playerMutex.Lock()
+	if playerStdin != nil {
+		playerStdin.Close()
+	}
+	playerCmd = nil
+	playerStdin = nil
+	playerMutex.Unlock()
 }
 
-// ================= ASR =================
 func processASR(pcm []int16) {
 	if float64(len(pcm))/16000.0 < 0.5 {
 		return
 	}
 
-	tsVadEnd = time.Now()
-
-	sessionIDMutex.Lock()
-	currentSessionID = uuid.New().String()
-	sessionIDMutex.Unlock()
-
+	// 1. ASR 识别转换
 	pcmBytes := make([]byte, len(pcm)*2)
 	for i, v := range pcm {
 		binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(v))
 	}
-
 	text := callASRWebSocket(pcmBytes)
 	if text == "" {
 		musicMgr.Unduck()
 		return
 	}
-	log.Printf("✅ 用户: [%s]", text)
+	log.Printf("✅ [ASR识别结果]: [%s]", text)
 
-	if containsAny(text, EXIT_WORDS) {
-		log.Println("💀 退出")
+	// 2. 二级打断判定 (物理退出)
+	if isExit(text) {
+		log.Println("💀 收到退出指令，关闭系统")
+		performStop()
 		os.Exit(0)
 	}
-	if containsAny(text, INTERRUPT_WORDS) {
-		performStop()
-		return
-	}
 
-	if getCurrentState() == STATE_SPEAKING {
-		log.Printf("🙉 [忽略]: 正在播报中，忽略闲聊 -> [%s]", text)
+	// 3. 物理忙碌判定
+	playerMutex.Lock()
+	isTtsBusy := playerCmd != nil && playerCmd.Process != nil
+	playerMutex.Unlock()
+	isMusicBusy := musicMgr.IsPlaying()
+
+	if isTtsBusy || isMusicBusy {
+		// 忙碌中仅响应打断词
+		if isInterrupt(text) {
+			log.Printf("🛑 [锁定穿透]: 指令 [%s] 触发物理打断", text)
+			performStop()
+			if strings.Contains(text, "换") || strings.Contains(text, "下") || strings.Contains(text, "切") {
+				musicMgr.SearchAndPlay("RANDOM")
+			}
+			return
+		}
+		// 忙碌中且不是打断词，直接忽略
+		log.Printf("🙉 [锁定拦截]: 系统正在忙碌，忽略普通指令")
 		musicMgr.Unduck()
 		return
 	}
 
+	// 4. 意图分析：动态决定是否开启联网搜索
+	enableSearch := false
+	// 只有涉及到时效性信息时才开启联网，以换取日常聊天的极速响应
+	searchKeywords := []string{"天气", "新闻", "今天", "几号", "星期几", "实时", "最新", "温度"}
+	for _, k := range searchKeywords {
+		if strings.Contains(text, k) {
+			enableSearch = true
+			break
+		}
+	}
+
+	// 5. 开启新会话
 	ctxMutex.Lock()
 	if sessionCancel != nil {
 		sessionCancel()
 	}
-	flushChannel(ttsManagerChan)
 	sessionCtx, sessionCancel = context.WithCancel(context.Background())
 	currentCtx := sessionCtx
 	ctxMutex.Unlock()
 
-	setState(STATE_SPEAKING)
-	go callAgentStream(currentCtx, text)
-}
-
-func setState(s AppState)       { stateMutex.Lock(); currentState = s; stateMutex.Unlock() }
-func getCurrentState() AppState { stateMutex.Lock(); defer stateMutex.Unlock(); return currentState }
-func containsAny(text string, k []string) bool {
-	for _, w := range k {
-		if strings.Contains(text, w) {
-			return true
-		}
-	}
-	return false
+	// 传入 enableSearch 标志位
+	go callAgentStream(currentCtx, text, enableSearch)
 }
 
 func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
@@ -745,11 +737,9 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 	log.Println("🎤 麦克风已开启...")
 
 	readBuf := make([]byte, 256*10*2)
-	vadBuf := make([]byte, 320*2)
 	vadAccumulator := make([]int16, 0, 1024)
 	var asrBuffer []int16
-	silenceCount := 0
-	speechCount := 0
+	silenceCount, speechCount := 0, 0
 	triggered := false
 
 	for {
@@ -758,8 +748,7 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 		}
 		rawInt16 := make([]int16, 256*10)
 		for i := 0; i < len(rawInt16); i++ {
-			val := int16(binary.LittleEndian.Uint16(readBuf[i*2 : i*2+2]))
-			rawInt16[i] = val
+			rawInt16[i] = int16(binary.LittleEndian.Uint16(readBuf[i*2 : i*2+2]))
 		}
 		clean, _ := aecProc.Process(rawInt16)
 		if clean == nil {
@@ -770,11 +759,11 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 		for len(vadAccumulator) >= 320 {
 			frame := vadAccumulator[:320]
 			vadAccumulator = vadAccumulator[320:]
+			vadBuf := make([]byte, 640)
 			for i, v := range frame {
 				binary.LittleEndian.PutUint16(vadBuf[i*2:], uint16(v))
 			}
 			active, _ := vadEng.Process(16000, vadBuf)
-
 			if active {
 				speechCount++
 				silenceCount = 0
@@ -787,12 +776,10 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 				triggered = true
 				musicMgr.Duck()
 			}
-
 			if triggered {
 				asrBuffer = append(asrBuffer, frame...)
-				isTooLong := len(asrBuffer) > 16000*8
-				if silenceCount > 10 || isTooLong {
-					if len(asrBuffer) > 16000*0.3 {
+				if silenceCount > 10 || len(asrBuffer) > 16000*8 {
+					if len(asrBuffer) > 4800 {
 						finalData := make([]int16, len(asrBuffer))
 						copy(finalData, asrBuffer)
 						go processASR(finalData)
@@ -817,7 +804,7 @@ func callASRWebSocket(data []byte) string {
 	dialer := websocket.Dialer{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	headers := http.Header{}
 	headers.Add("Authorization", "Bearer "+DASH_API_KEY)
-	conn, _, err := dialer.Dial(WS_ASR_URL, headers)
+	conn, _, err := dialer.Dial(WS_AS_URL, headers)
 	if err != nil {
 		return ""
 	}
