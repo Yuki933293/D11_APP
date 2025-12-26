@@ -655,12 +655,23 @@ func performStop() {
 	playerMutex.Unlock()
 }
 
+// 辅助判定：ASR 文本是否包含明确的点歌/换歌意图
+func hasMusicIntent(text string) bool {
+	// 包含这些动词通常意味着用户想操作音乐
+	musicKeywords := []string{"播放", "点歌", "想要听", "要听", "唱一首", "换一首", "切歌", "下一首", "来一首"}
+	for _, k := range musicKeywords {
+		if strings.Contains(text, k) {
+			return true
+		}
+	}
+	return false
+}
+
 func processASR(pcm []int16) {
 	if float64(len(pcm))/16000.0 < 0.5 {
 		return
 	}
 
-	// 1. ASR 识别转换
 	pcmBytes := make([]byte, len(pcm)*2)
 	for i, v := range pcm {
 		binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(v))
@@ -672,38 +683,50 @@ func processASR(pcm []int16) {
 	}
 	log.Printf("✅ [ASR识别结果]: [%s]", text)
 
-	// 2. 二级打断判定 (物理退出)
+	// 1. 二级打断：退出判定
 	if isExit(text) {
 		log.Println("💀 收到退出指令，关闭系统")
 		performStop()
 		os.Exit(0)
 	}
 
-	// 3. 物理忙碌判定
+	// 2. 获取物理占用状态
 	playerMutex.Lock()
 	isTtsBusy := playerCmd != nil && playerCmd.Process != nil
 	playerMutex.Unlock()
 	isMusicBusy := musicMgr.IsPlaying()
 
+	// 3. 核心改进：忙碌状态下的穿透逻辑
 	if isTtsBusy || isMusicBusy {
-		// 忙碌中仅响应打断词
-		if isInterrupt(text) {
-			log.Printf("🛑 [锁定穿透]: 指令 [%s] 触发物理打断", text)
+		musicReq := hasMusicIntent(text)
+
+		// 允许打断词或点歌意图“穿透”锁定
+		if isInterrupt(text) || musicReq {
+			log.Printf("🛑 [忙碌穿透]: 指令 [%s] 合法，执行物理清理并重置意图", text)
 			performStop()
-			if strings.Contains(text, "换") || strings.Contains(text, "下") || strings.Contains(text, "切") {
+
+			// 如果只是纯粹的“换一首/切歌”且不包含具体歌名，直接执行随机播放并返回
+			// 这样可以避免 LLM 推理的延迟
+			isQuickSwitch := (strings.Contains(text, "换") || strings.Contains(text, "下") || strings.Contains(text, "切")) &&
+				!strings.Contains(text, "播放") && !strings.Contains(text, "听")
+
+			if isQuickSwitch {
 				musicMgr.SearchAndPlay("RANDOM")
+				return
 			}
+
+			// 如果是“听庙堂之外”，执行完 performStop 后不 return，
+			// 而是继续往下走，交给 LLM 解析出 [PLAY:庙堂之外]
+		} else {
+			// 真正的无关闲聊，在忙碌时依然拦截
+			log.Printf("🙉 [锁定拦截]: 忽略非控制类指令: [%s]", text)
+			musicMgr.Unduck()
 			return
 		}
-		// 忙碌中且不是打断词，直接忽略
-		log.Printf("🙉 [锁定拦截]: 系统正在忙碌，忽略普通指令")
-		musicMgr.Unduck()
-		return
 	}
 
-	// 4. 意图分析：动态决定是否开启联网搜索
+	// 4. 联网搜索判定
 	enableSearch := false
-	// 只有涉及到时效性信息时才开启联网，以换取日常聊天的极速响应
 	searchKeywords := []string{"天气", "新闻", "今天", "几号", "星期几", "实时", "最新", "温度"}
 	for _, k := range searchKeywords {
 		if strings.Contains(text, k) {
@@ -712,7 +735,7 @@ func processASR(pcm []int16) {
 		}
 	}
 
-	// 5. 开启新会话
+	// 5. 开启会话并执行 LLM 推理
 	ctxMutex.Lock()
 	if sessionCancel != nil {
 		sessionCancel()
@@ -721,7 +744,6 @@ func processASR(pcm []int16) {
 	currentCtx := sessionCtx
 	ctxMutex.Unlock()
 
-	// 传入 enableSearch 标志位
 	go callAgentStream(currentCtx, text, enableSearch)
 }
 
