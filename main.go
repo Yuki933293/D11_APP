@@ -19,8 +19,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,13 +33,22 @@ import (
 )
 
 // ================= 1. 常量配置 =================
-const DASH_API_KEY = "sk-fb64515c017945fc9282f9ace355cad3"
+// 注意：不要把真实 Key 写死在代码里，统一通过环境变量/配置文件注入（见 deploy/ai_box.env.example）。
+const DASH_API_KEY = ""
 
 const TTS_WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 const LLM_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
 const WS_AS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 
 const MUSIC_DIR = "/userdata/AI_BOX/music"
+
+// ================= 1.5 云端伪唤醒配置 =================
+// 说明：
+// - “伪唤醒”指：仍使用云端 ASR 做文本识别，但在业务层加一层门控状态机；
+// - 休眠态只响应唤醒词，其余任何指令（包含 EXIT/INTERRUPT）都忽略；
+// - 唤醒后进入 AWAKE 态，超过一定时间无交互且无播放占用时回到休眠态。
+const WAKE_IDLE_TIMEOUT = 90 * time.Second
+const WAKE_ACK_TEXT = "我在"
 
 // ================= 2. 双级打断词库 =================
 var EXIT_WORDS = []string{
@@ -47,7 +58,14 @@ var EXIT_WORDS = []string{
 
 var INTERRUPT_WORDS = []string{
 	"闭嘴", "停止", "安静", "别说了", "暂停", "打断",
-	"别唱了", "等一下", "换首歌", "下一首", "切歌", "不要说了",
+	"别唱了", "等一下", "换首歌", "下一首", "切歌", "不要说了", "换一首",
+}
+
+// ================= 2.5 云端伪唤醒词库 =================
+// 注意：这里放一些常见同音/误识别变体，尽量提高“唤醒命中率”。
+var WAKE_WORDS = []string{
+	"你好小瑞", "你好小睿", "你好晓瑞",
+	"小瑞", "小睿", "晓瑞",
 }
 
 // ================= 3. 并发控制与状态变量 =================
@@ -71,6 +89,10 @@ var (
 	emojiRegex *regexp.Regexp
 	musicPunct = regexp.MustCompile(`[，。！？,.!?\s；;：:“”"'《》()（）【】\[\]、]`)
 	musicMgr   *MusicManager
+
+	// 云端伪唤醒状态：默认休眠，命中唤醒词后进入唤醒态
+	awakeFlag          atomic.Bool
+	lastActiveUnixNano atomic.Int64
 )
 
 // ================= 4. 性能监控辅助变量 =================
@@ -97,6 +119,9 @@ func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	log.Println("=== RK3308 AI 助手 (V160.21 物理资源锁定版) ===")
 
+	// 一键部署配置加载（环境变量优先，其次读取 env 文件）
+	initRuntimeConfig()
+
 	ttsManagerChan = make(chan string, 500)
 	audioPcmChan = make(chan []byte, 4000)
 
@@ -105,8 +130,13 @@ func main() {
 
 	musicMgr = NewMusicManager()
 
+	awakeFlag.Store(false)
+	lastActiveUnixNano.Store(0)
+	log.Println("😴 [伪唤醒] 初始为休眠态，仅响应唤醒词（例如：你好小瑞）")
+
 	go audioPlayer()
 	go ttsManagerLoop()
+	go wakeIdleMonitor()
 
 	aecProc := aec.NewProcessor()
 	vadEng, err := vado.New()
@@ -138,6 +168,95 @@ func isInterrupt(text string) bool {
 		}
 	}
 	return false
+}
+
+func touchActive() {
+	lastActiveUnixNano.Store(time.Now().UnixNano())
+}
+
+func normalizeWakeText(text string) string {
+	// 去掉标点/空白，便于匹配“你好，小瑞”等变体
+	s := strings.ToLower(strings.TrimSpace(text))
+	s = musicPunct.ReplaceAllString(s, "")
+	return s
+}
+
+// stripWakeAndGetTail 解析“唤醒词 + 后续指令”：
+// - 命中唤醒词且后续为空：pureWake=true
+// - 命中唤醒词且后续非空：返回 tail（尽量取唤醒词之后的原始文本）
+// - 未命中：hit=false
+func stripWakeAndGetTail(text string) (tail string, hit bool, pureWake bool) {
+	normalized := normalizeWakeText(text)
+	for _, w := range WAKE_WORDS {
+		nw := normalizeWakeText(w)
+		idx := strings.Index(normalized, nw)
+		if idx < 0 {
+			continue
+		}
+
+		// 以“唤醒词之后”的内容来判断是否还有指令（避免把唤醒词前的噪声/口头禅当成指令）
+		tailNorm := strings.TrimSpace(normalized[idx+len(nw):])
+		if tailNorm == "" {
+			return "", true, true
+		}
+
+		// 尽量从原始文本中截取“唤醒词之后”的指令
+		if pos := strings.Index(text, w); pos >= 0 {
+			rawTail := strings.TrimSpace(text[pos+len(w):])
+			rawTail = strings.TrimSpace(musicPunct.ReplaceAllString(rawTail, ""))
+			if rawTail != "" {
+				return rawTail, true, false
+			}
+		}
+
+		// 若无法可靠剥离（例如中间被插入标点/空格），退化为把原文本交给后续意图处理
+		return text, true, false
+	}
+	return "", false, false
+}
+
+func speakWakeAck() {
+	// 仅唤醒词时不走 LLM，直接云端 TTS 播报一句“我在”
+	flushChannel(ttsManagerChan)
+	ttsManagerChan <- wakeAckText
+	ttsManagerChan <- "[[END]]"
+}
+
+func isPhysicalBusy() bool {
+	playerMutex.Lock()
+	isTtsBusy := playerCmd != nil && playerCmd.Process != nil
+	playerMutex.Unlock()
+	isMusicBusy := false
+	if musicMgr != nil {
+		isMusicBusy = musicMgr.IsPlaying()
+	}
+	return isTtsBusy || isMusicBusy
+}
+
+func wakeIdleMonitor() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if !awakeFlag.Load() {
+			continue
+		}
+		// 正在播报/放歌时不进入休眠，避免“音乐无人能停”的体验
+		if isPhysicalBusy() {
+			continue
+		}
+
+		last := time.Unix(0, lastActiveUnixNano.Load())
+		if last.IsZero() {
+			continue
+		}
+		if time.Since(last) <= wakeIdleTimeout {
+			continue
+		}
+
+		awakeFlag.Store(false)
+		log.Println("😴 [伪唤醒] 长时间无交互，进入休眠态，等待唤醒词...")
+	}
 }
 
 // ================= 🎵 音乐管理器 =================
@@ -365,14 +484,14 @@ func (m *MusicManager) PlayFile(path string) {
 }
 
 func (m *MusicManager) SearchAndPlay(query string) bool {
-	files, err := ioutil.ReadDir(MUSIC_DIR)
+	files, err := ioutil.ReadDir(musicDir)
 	if err != nil {
 		return false
 	}
 	var candidates []string
 	for _, f := range files {
 		if !f.IsDir() && strings.HasSuffix(strings.ToLower(f.Name()), ".wav") {
-			candidates = append(candidates, filepath.Join(MUSIC_DIR, f.Name()))
+			candidates = append(candidates, filepath.Join(musicDir, f.Name()))
 		}
 	}
 	if len(candidates) == 0 {
@@ -417,7 +536,7 @@ func audioPlayer() {
 
 	for pcmData := range audioPcmChan {
 		if len(pcmData) == 0 {
-			log.Println("🔍 [Audio-Link] 收到数据结束标志，执行物理保活...")
+			log.Println("[Audio-Link] 收到数据结束标志，执行物理保活...")
 			time.Sleep(500 * time.Millisecond)
 			if playerStdin != nil {
 				playerStdin.Close()
@@ -431,7 +550,7 @@ func audioPlayer() {
 					playerCmd = nil
 					playerStdin = nil
 					playerMutex.Unlock()
-					log.Println("✅ [Audio-Link] 物理播报完成，系统解锁")
+					log.Println("[Audio-Link] 物理播报完成，系统解锁")
 				}(playerCmd)
 			}
 			continue
@@ -485,7 +604,7 @@ func ttsManagerLoop() {
 				if !firstPacketReceived {
 					tsFirstAudio = time.Now()
 					firstPacketReceived = true
-					log.Printf("🚀 [性能] TTS 首包: %v", tsFirstAudio.Sub(tsTtsStart))
+					log.Printf("TTS 首包: %v", tsFirstAudio.Sub(tsTtsStart))
 				}
 				if !isCanceled() {
 					audioPcmChan <- msg
@@ -553,8 +672,8 @@ func ttsManagerLoop() {
 			if conn == nil {
 				dialer := websocket.Dialer{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 				headers := http.Header{}
-				headers.Add("Authorization", "Bearer "+DASH_API_KEY)
-				c, _, err := dialer.Dial(TTS_WS_URL, headers)
+				headers.Add("Authorization", "Bearer "+dashAPIKey)
+				c, _, err := dialer.Dial(ttsWsURL, headers)
 				if err != nil {
 					continue
 				}
@@ -568,8 +687,8 @@ func ttsManagerLoop() {
 					"header": map[string]interface{}{"task_id": currentTaskID, "action": "run-task", "streaming": "duplex"},
 					"payload": map[string]interface{}{
 						"task_group": "audio", "task": "tts", "function": "SpeechSynthesizer",
-						"model":      "cosyvoice-v3-plus",
-						"parameters": map[string]interface{}{"text_type": "PlainText", "voice": "longanhuan", "format": "pcm", "sample_rate": 22050, "volume": 50, "enable_ssml": false},
+						"model":      ttsModel,
+						"parameters": map[string]interface{}{"text_type": "PlainText", "voice": ttsVoice, "format": "pcm", "sample_rate": ttsSampleRate, "volume": ttsVolume, "enable_ssml": false},
 						"input":      map[string]interface{}{},
 					},
 				})
@@ -596,10 +715,10 @@ func callAgentStream(ctx context.Context, prompt string, enableSearch bool) {
 	llmStart := time.Now()
 
 	// 策略：联网搜索用 Max(准确但慢)，普通闲聊用 Turbo(极快)
-	modelName := "qwen-turbo-latest"
+	modelName := llmModelFast
 	if enableSearch {
-		modelName = "qwen-max"
-		log.Println("🌐 [LLM]: 检测到时效性需求，已动态开启联网搜索...")
+		modelName = llmModelSearch
+		log.Println("LLM: 检测到时效性需求，已动态开启联网搜索...")
 	}
 
 	systemPrompt := "你是智能助手。仅在用户【明确要求播放音乐】（如“放首歌”、“听周杰伦”）时，才在回复末尾添加 [PLAY: 歌名]（随机播放用 [PLAY: RANDOM]）。" +
@@ -621,14 +740,14 @@ func callAgentStream(ctx context.Context, prompt string, enableSearch bool) {
 	}
 
 	jsonBody, _ := json.Marshal(payload)
-	req, _ := http.NewRequestWithContext(ctx, "POST", LLM_URL, bytes.NewReader(jsonBody))
-	req.Header.Set("Authorization", "Bearer "+DASH_API_KEY)
+	req, _ := http.NewRequestWithContext(ctx, "POST", llmURL, bytes.NewReader(jsonBody))
+	req.Header.Set("Authorization", "Bearer "+dashAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-DashScope-SSE", "enable")
 
 	resp, err := insecureClient.Do(req)
 	if err != nil {
-		log.Printf("❌ [LLM]: 请求失败: %v", err)
+		log.Printf("❌ LLM: 请求失败: %v", err)
 		musicMgr.Unduck()
 		return
 	}
@@ -639,7 +758,7 @@ func callAgentStream(ctx context.Context, prompt string, enableSearch bool) {
 	var chunkBuffer strings.Builder
 	var firstChunkSent = false
 
-	fmt.Print("📝 [LLM 推理]: ")
+	fmt.Print("LLM 推理: ")
 
 	for scanner.Scan() {
 		select {
@@ -689,7 +808,7 @@ func callAgentStream(ctx context.Context, prompt string, enableSearch bool) {
 		}
 	}
 	fmt.Println()
-	log.Printf("⏱️ [性能] LLM 推理结束，总耗时: %v", time.Since(llmStart))
+	log.Printf("⏱LLM 推理结束，总耗时: %v", time.Since(llmStart))
 
 	// 处理剩余文本
 	sendChunk(&chunkBuffer)
@@ -715,7 +834,7 @@ func sendChunk(buf *strings.Builder) {
 }
 
 func performStop() {
-	log.Println("🧹 [物理清理]: 强制切断所有声音源")
+	log.Println("物理清理: 强制切断所有声音源")
 	ctxMutex.Lock()
 	if sessionCancel != nil {
 		sessionCancel()
@@ -740,7 +859,7 @@ func performStop() {
 // 辅助判定：ASR 文本是否包含明确的点歌/换歌意图
 func hasMusicIntent(text string) bool {
 	// 包含这些动词通常意味着用户想操作音乐
-	musicKeywords := []string{"播放", "点歌", "想要听", "要听", "唱一首", "换一首", "切歌", "下一首", "来一首"}
+	musicKeywords := []string{"播放", "想要听", "要听"}
 	for _, k := range musicKeywords {
 		if strings.Contains(text, k) {
 			return true
@@ -763,11 +882,58 @@ func processASR(pcm []int16) {
 		musicMgr.Unduck()
 		return
 	}
-	log.Printf("✅ [ASR识别结果]: [%s]", text)
+
+	// ================= 伪唤醒门控（最小侵入） =================
+	tail, hitWake, pureWake := stripWakeAndGetTail(text)
+
+	if !awakeFlag.Load() {
+		// 休眠态：只有命中唤醒词才进入后续处理，其余任何指令都忽略
+		if !hitWake {
+			log.Printf("[休眠] 未检测到唤醒词，忽略: [%s]", text)
+			musicMgr.Unduck()
+			return
+		}
+
+		awakeFlag.Store(true)
+		touchActive()
+
+		// 纯唤醒词：播报“我在”
+		if pureWake {
+			log.Println("[伪唤醒] 唤醒成功")
+			speakWakeAck()
+			musicMgr.Unduck()
+			return
+		}
+
+		// 唤醒词后携带指令：直接处理（不播“我在”）
+		if strings.TrimSpace(tail) != "" {
+			log.Printf("[伪唤醒] 唤醒并转入指令: [%s]", tail)
+			text = tail
+		} else {
+			// 理论不会出现：pureWake=false 但 tail 为空；兜底不改原 text
+			log.Printf("[伪唤醒] 唤醒命中但未解析到后续指令，按原文处理: [%s]", text)
+		}
+	} else {
+		// 唤醒态：刷新活跃时间；若仅唤醒词则回应“我在”，若携带指令则剥离后继续处理
+		touchActive()
+		if hitWake {
+			if pureWake {
+				log.Println("[伪唤醒] 收到唤醒词")
+				speakWakeAck()
+				musicMgr.Unduck()
+				return
+			}
+			if strings.TrimSpace(tail) != "" && tail != text {
+				text = tail
+			}
+		}
+	}
+
+	log.Printf("ASR识别结果: [%s]", text)
 
 	// 1. 二级打断：退出判定
 	if isExit(text) {
-		log.Println("💀 收到退出指令，关闭系统")
+		log.Println("收到退出指令，关闭系统")
 		performStop()
 		os.Exit(0)
 	}
@@ -784,7 +950,7 @@ func processASR(pcm []int16) {
 
 		// 允许打断词或点歌意图“穿透”锁定
 		if isInterrupt(text) || musicReq {
-			log.Printf("🛑 [忙碌穿透]: 指令 [%s] 合法，执行物理清理并重置意图", text)
+			log.Printf("忙碌穿透: 指令 [%s] 合法，执行物理清理并重置意图", text)
 			performStop()
 
 			// 如果只是纯粹的“换一首/切歌”且不包含具体歌名，直接执行随机播放并返回
@@ -801,7 +967,7 @@ func processASR(pcm []int16) {
 			// 而是继续往下走，交给 LLM 解析出 [PLAY:庙堂之外]
 		} else {
 			// 真正的无关闲聊，在忙碌时依然拦截
-			log.Printf("🙉 [锁定拦截]: 忽略非控制类指令: [%s]", text)
+			log.Printf("锁定拦截: 忽略非控制类指令: [%s]", text)
 			musicMgr.Unduck()
 			return
 		}
@@ -809,7 +975,7 @@ func processASR(pcm []int16) {
 
 	// 4. 联网搜索判定
 	enableSearch := false
-	searchKeywords := []string{"天气", "新闻", "今天", "几号", "星期几", "实时", "最新", "温度"}
+	searchKeywords := []string{"天气", "今天", "星期几", "实时", "最新"}
 	for _, k := range searchKeywords {
 		if strings.Contains(text, k) {
 			enableSearch = true
@@ -830,7 +996,15 @@ func processASR(pcm []int16) {
 }
 
 func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
-	cmd := exec.Command("arecord", "-D", "hw:2,0", "-c", "10", "-r", "16000", "-f", "S16_LE", "-t", "raw", "--period-size=256", "--buffer-size=16384")
+	cmd := exec.Command("arecord",
+		"-D", arecordDevice,
+		"-c", strconv.Itoa(arecordChannels),
+		"-r", strconv.Itoa(arecordRate),
+		"-f", "S16_LE",
+		"-t", "raw",
+		"--period-size="+strconv.Itoa(arecordPeriodSize),
+		"--buffer-size="+strconv.Itoa(arecordBufferSize),
+	)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		log.Fatal(err)
@@ -919,8 +1093,8 @@ func audioLoop(aecProc *aec.Processor, vadEng *vado.VAD) {
 func callASRWebSocket(data []byte) string {
 	dialer := websocket.Dialer{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	headers := http.Header{}
-	headers.Add("Authorization", "Bearer "+DASH_API_KEY)
-	conn, _, err := dialer.Dial(WS_AS_URL, headers)
+	headers.Add("Authorization", "Bearer "+dashAPIKey)
+	conn, _, err := dialer.Dial(asrWsURL, headers)
 	if err != nil {
 		return ""
 	}
@@ -928,7 +1102,7 @@ func callASRWebSocket(data []byte) string {
 	id := fmt.Sprintf("%032x", rand.Int63())
 	conn.WriteJSON(map[string]interface{}{
 		"header":  map[string]interface{}{"task_id": id, "action": "run-task", "streaming": "duplex"},
-		"payload": map[string]interface{}{"task_group": "audio", "task": "asr", "function": "recognition", "model": "paraformer-realtime-v2", "parameters": map[string]interface{}{"format": "pcm", "sample_rate": 16000}, "input": map[string]interface{}{}},
+		"payload": map[string]interface{}{"task_group": "audio", "task": "asr", "function": "recognition", "model": asrModel, "parameters": map[string]interface{}{"format": "pcm", "sample_rate": asrSampleRate}, "input": map[string]interface{}{}},
 	})
 	for i := 0; i < len(data); i += 3200 {
 		end := i + 3200

@@ -1,0 +1,13 @@
+package webrtcvad
+//go:cgo_import_dynamic __assert_rtn __assert_rtn ""
+//go:cgo_import_dynamic __chkstk_darwin __chkstk_darwin ""
+//go:cgo_import_dynamic __memcpy_chk __memcpy_chk ""
+//go:cgo_import_dynamic __stack_chk_fail __stack_chk_fail ""
+//go:cgo_import_dynamic __stack_chk_guard __stack_chk_guard ""
+//go:cgo_import_dynamic bzero bzero ""
+//go:cgo_import_dynamic free free ""
+//go:cgo_import_dynamic malloc malloc ""
+//go:cgo_import_dynamic memcpy memcpy ""
+//go:cgo_import_dynamic memset_pattern16 memset_pattern16 ""
+//go:cgo_import_dynamic pthread_once pthread_once ""
+//go:cgo_import_dynamic _ _ "/usr/lib/libSystem.B.dylib"
