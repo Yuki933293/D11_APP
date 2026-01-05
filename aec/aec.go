@@ -1,3 +1,6 @@
+//go:build linux && cgo
+// +build linux,cgo
+
 package aec
 
 /*
@@ -70,7 +73,12 @@ int wrap_aec_process(short* input_raw, short* output_clean) {
     // --- 步骤 C: 数据输出 (Planar float -> int16) ---
     // 取第 0 通道作为降噪后的结果
     for (int i = 0; i < frame_size; i++) {
-        output_clean[i] = (short)(internal_buf[0 * frame_size + i]);
+        // 重要：必须做饱和裁剪。
+        // 若算法输出 float 超出 int16 可表示范围，直接强转会产生严重失真，影响 VAD/ASR。
+        float v = internal_buf[0 * frame_size + i];
+        if (v > 32767.0f) v = 32767.0f;
+        if (v < -32768.0f) v = -32768.0f;
+        output_clean[i] = (short)(v);
     }
 
     return doa;
@@ -121,8 +129,8 @@ func (p *Processor) Process(input []int16) ([]int16, int) {
 	doa := C.wrap_aec_process(inPtr, outPtr)
 
 	if doa == -1 {
-		// 错误处理：如果未初始化
-		return make([]int16, FrameSize), 0
+		// 错误处理：如果未初始化，返回 nil 让上层回退到直通，避免输出全 0 影响识别。
+		return nil, 0
 	}
 
 	return output, int(doa)
