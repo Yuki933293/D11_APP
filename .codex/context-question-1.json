@@ -1,0 +1,21 @@
+{
+  "date": "2026-01-23",
+  "executor": "Codex",
+  "questions": [
+    {
+      "priority": "高",
+      "question": "额外播报的歌名是否发生在 [PLAY:...] 之后，需要在流式过滤时截断标记后的文本？",
+      "evidence": "main.go:739 流式TTS发送；main.go:817 过滤在分片级处理"
+    },
+    {
+      "priority": "高",
+      "question": "快速切歌调用 performStop 后是否会清空当前曲目，导致随机选歌无法排除当前曲目？",
+      "evidence": "main.go:321 Stop 会清空播放状态；main.go:972 quickSwitch 先 performStop 再 SearchAndPlay"
+    },
+    {
+      "priority": "中",
+      "question": "随机选歌逻辑是否可抽成纯函数以便单元测试覆盖？",
+      "evidence": "main.go:486 SearchAndPlay 内直接 rand.Intn"
+    }
+  ]
+}

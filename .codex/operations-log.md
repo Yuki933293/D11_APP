@@ -1,0 +1,144 @@
+# operations-log.md
+
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: mcp__sequential_thinking__sequentialthinking | 参数: thoughtNumber=1,totalThoughts=3 | 输出摘要: thoughtHistoryLength=1
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: cat ~/.codex/skills/AI_BOX/SKILL.md | 输出摘要: 读取技能文档成功
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: mcp__sequential_thinking__sequentialthinking | 参数: thoughtNumber=2,totalThoughts=2 | 输出摘要: thoughtHistoryLength=2
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: rg -n "\\[PLAY" . | 输出摘要: main.go 命中 3 处
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: sed -n '760,900p' main.go | 输出摘要: 查看 LLM 流式与 sendChunk 逻辑
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: rg -n "func cleanText|cleanText\\(" main.go | 输出摘要: cleanText 定义与调用位置
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: sed -n '120,180p' main.go | 输出摘要: 查看 cleanText 与启动流程
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: rg -n "ttsManagerChan" main.go | 输出摘要: ttsManagerChan 使用点定位
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: sed -n '600,750p' main.go | 输出摘要: 查看 TTS 管理循环与 callAgentStream 开头
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: sed -n '800,860p' main.go | 输出摘要: 查看 sendChunk 与指令解析
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: rg -n "SearchAndPlay|\\[PLAY" -S . | 输出摘要: SearchAndPlay 定义位置
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: sed -n '430,520p' main.go | 输出摘要: 查看 MusicManager SearchAndPlay 实现
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: rg --files -g "*_test.go" . | 输出摘要: 未发现测试文件
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: rg --files -g "operations-log.md" . | 输出摘要: 未发现 operations-log.md
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 15:03:45 +0800
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: apply_patch | 参数: main.go 添加控制标记过滤器 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: apply_patch | 参数: main.go callAgentStream 引入过滤 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: apply_patch | 参数: 新增 main_test.go | 输出摘要: 添加测试文件
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: mkdir -p .codex | 输出摘要: 创建日志目录
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: go test ./... | 输出摘要: 失败，Go build 缓存目录无权限
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command (require_escalated) | 参数: go test ./... | 输出摘要: ok ai_box
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: apply_patch | 参数: 新增 .codex/testing.md | 输出摘要: 写入测试记录
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: apply_patch | 参数: 新增 verification.md | 输出摘要: 写入验证结论
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: nl -ba main.go | sed -n '140,220p' | 输出摘要: 获取控制标记过滤器行号
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: nl -ba main.go | sed -n '720,860p' | 输出摘要: 获取 callAgentStream 行号
+- 时间: 2026-01-23 15:03:45 +0800 | 工具: shell_command | 参数: nl -ba main_test.go | 输出摘要: 获取测试文件行号
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: mcp__sequential_thinking__sequentialthinking | 参数: thoughtNumber=1,totalThoughts=3 | 输出摘要: thoughtHistoryLength=3
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command | 参数: cat ~/.codex/skills/using-superpowers/SKILL.md | 输出摘要: 读取技能文档成功
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command | 参数: cat ~/.codex/skills/AI_BOX/SKILL.md | 输出摘要: 读取技能文档成功
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command | 参数: rg -n "current|playing|now|last|song" main.go | 输出摘要: 定位播放状态相关字段
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command | 参数: sed -n '270,360p' main.go | 输出摘要: 查看 MusicManager 结构
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command | 参数: sed -n '360,450p' main.go | 输出摘要: 查看播放流程
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command | 参数: sed -n '940,1030p' main.go | 输出摘要: 查看 quickSwitch 逻辑
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: apply_patch | 参数: controlTagFilter 增加终止播报状态 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: apply_patch | 参数: MusicManager 记录当前曲目与随机排除逻辑 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: apply_patch | 参数: quickSwitch 使用排除当前曲目随机播放 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: apply_patch | 参数: 新增过滤与随机选择单元测试 | 输出摘要: 更新 main_test.go
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: apply_patch | 参数: 写入 .codex/context-scan.json | 输出摘要: 结构化扫描完成
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: mcp__sequential_thinking__sequentialthinking | 参数: thoughtNumber=2,totalThoughts=2 | 输出摘要: thoughtHistoryLength=4
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: apply_patch | 参数: 写入 .codex/context-question-1.json | 输出摘要: 关键疑问列表生成
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: apply_patch | 参数: 写入 .codex/context-sufficiency.json | 输出摘要: 充分性检查完成
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: mcp__shrimp__plan_task | 参数: 播报过滤与随机切歌规划 | 输出摘要: 返回规划步骤
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command | 参数: ls -a | 输出摘要: 获取目录结构
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command | 参数: rg --files -g "shrimp-rules.md" . | 输出摘要: 未找到 shrimp-rules.md
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: mcp__shrimp__analyze_task | 参数: 初步方案分析 | 输出摘要: 返回反思指引
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: mcp__shrimp__reflect_task | 参数: 架构一致性反思 | 输出摘要: 返回拆分任务指引
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: mcp__shrimp__split_tasks | 参数: 拆分三项子任务 | 输出摘要: 任务ID 6d007f02/5d7ee3fe/6734dbac
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command (require_escalated) | 参数: go test ./... | 输出摘要: ok ai_box
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: apply_patch | 参数: 更新 .codex/testing.md | 输出摘要: 追加测试输出
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: apply_patch | 参数: 更新 verification.md | 输出摘要: 更新验证结论
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: 备注 | 参数: code-index 不可用，已使用 rg/sed 替代检索 | 输出摘要: 记录降级策略
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 15:23:50 +0800
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command | 参数: nl -ba main.go | sed -n '150,240p' | 输出摘要: 获取过滤器行号
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command | 参数: nl -ba main.go | sed -n '280,520p' | 输出摘要: 获取 MusicManager 行号
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command | 参数: nl -ba main.go | sed -n '520,620p' | 输出摘要: 获取随机选择逻辑行号
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command | 参数: nl -ba main.go | sed -n '990,1105p' | 输出摘要: 获取 quickSwitch 行号
+- 时间: 2026-01-23 15:23:50 +0800 | 工具: shell_command | 参数: nl -ba main_test.go | 输出摘要: 获取更新后测试行号
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: mcp__sequential_thinking__sequentialthinking | 参数: thoughtNumber=1,totalThoughts=3 | 输出摘要: thoughtHistoryLength=3
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: shell_command | 参数: cat ~/.codex/skills/using-superpowers/SKILL.md | 输出摘要: 读取技能文档成功
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: shell_command | 参数: cat ~/.codex/skills/AI_BOX/SKILL.md | 输出摘要: 读取技能文档成功
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: apply_patch | 参数: callAgentStream 支持抑制流式播报并改用播放确认 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: apply_patch | 参数: SearchAndPlay 返回标题并新增 songDisplayName | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: apply_patch | 参数: quickSwitch 播报下一首 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: apply_patch | 参数: 扩展 hasMusicIntent 关键词 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: apply_patch | 参数: 新增 speakPlayConfirmation | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: apply_patch | 参数: callAgentStream 新增 suppressStreaming 传参 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: shell_command (require_escalated) | 参数: go test ./... | 输出摘要: ok ai_box
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: apply_patch | 参数: 更新 main_test.go | 输出摘要: 新增音乐意图测试
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: shell_command (require_escalated) | 参数: go test ./... | 输出摘要: ok ai_box
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: apply_patch | 参数: 更新 .codex/testing.md | 输出摘要: 追加测试输出
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: apply_patch | 参数: 更新 verification.md | 输出摘要: 更新验证结论
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 15:36:52 +0800
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: shell_command | 参数: nl -ba main.go | sed -n '150,220p' | 输出摘要: 获取过滤器行号
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: shell_command | 参数: nl -ba main.go | sed -n '520,640p' | 输出摘要: 获取随机播放相关行号
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: shell_command | 参数: nl -ba main.go | sed -n '760,940p' | 输出摘要: 获取 callAgentStream 行号
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: shell_command | 参数: nl -ba main.go | sed -n '940,1020p' | 输出摘要: 获取播报确认与意图识别行号
+- 时间: 2026-01-23 15:36:52 +0800 | 工具: shell_command | 参数: nl -ba main_test.go | 输出摘要: 获取测试行号
+- 时间: 2026-01-23 15:47:24 +0800 | 工具: apply_patch | 参数: 新增 extractTitleFromPath 并调整返回标题 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:47:24 +0800 | 工具: apply_patch | 参数: 新增标题提取单元测试 | 输出摘要: 更新 main_test.go
+- 时间: 2026-01-23 15:47:24 +0800 | 工具: shell_command (require_escalated) | 参数: go test ./... | 输出摘要: ok ai_box
+- 时间: 2026-01-23 15:47:24 +0800 | 工具: apply_patch | 参数: 更新 .codex/testing.md | 输出摘要: 追加测试输出
+- 时间: 2026-01-23 15:47:24 +0800 | 工具: apply_patch | 参数: 更新 verification.md | 输出摘要: 更新验证结论
+- 时间: 2026-01-23 15:47:24 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 15:47:24 +0800
+- 时间: 2026-01-23 15:56:41 +0800 | 工具: mcp__sequential_thinking__sequentialthinking | 参数: thoughtNumber=1,totalThoughts=1 | 输出摘要: thoughtHistoryLength=5
+- 时间: 2026-01-23 15:56:41 +0800 | 工具: apply_patch | 参数: 新增 ttsDoneChan 与播报完成信号 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:56:41 +0800 | 工具: apply_patch | 参数: 增加播报等待函数 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:56:41 +0800 | 工具: apply_patch | 参数: 抽取 selectSong 并调整播放流程 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:56:41 +0800 | 工具: apply_patch | 参数: [PLAY] 先播报后播放 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:56:41 +0800 | 工具: apply_patch | 参数: quickSwitch 先播报后播放 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:56:41 +0800 | 工具: apply_patch | 参数: 调整 main_test.go | 输出摘要: 更新测试文件
+- 时间: 2026-01-23 15:56:41 +0800 | 工具: apply_patch | 参数: 回滚依赖文件系统测试 | 输出摘要: 移除不稳定测试
+- 时间: 2026-01-23 15:56:41 +0800 | 工具: shell_command (require_escalated) | 参数: go test ./... | 输出摘要: ok ai_box
+- 时间: 2026-01-23 15:56:41 +0800 | 工具: apply_patch | 参数: 更新 .codex/testing.md | 输出摘要: 追加测试输出
+- 时间: 2026-01-23 15:56:41 +0800 | 工具: apply_patch | 参数: 更新 verification.md | 输出摘要: 更新验证结论
+- 时间: 2026-01-23 15:56:41 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 15:56:41 +0800
+- 时间: 2026-01-23 15:59:06 +0800 | 工具: apply_patch | 参数: 扩展音乐意图关键词 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 15:59:06 +0800 | 工具: apply_patch | 参数: 更新意图识别测试 | 输出摘要: 更新 main_test.go
+- 时间: 2026-01-23 15:59:06 +0800 | 工具: shell_command (require_escalated) | 参数: go test ./... | 输出摘要: ok ai_box
+- 时间: 2026-01-23 15:59:06 +0800 | 工具: apply_patch | 参数: 更新 .codex/testing.md | 输出摘要: 追加测试输出
+- 时间: 2026-01-23 15:59:06 +0800 | 工具: apply_patch | 参数: 更新 verification.md | 输出摘要: 更新验证结论
+- 时间: 2026-01-23 15:59:06 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 15:59:06 +0800
+- 时间: 2026-01-23 16:02:05 +0800 | 工具: apply_patch | 参数: 音乐意图识别去空格/标点 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 16:02:05 +0800 | 工具: apply_patch | 参数: 更新音乐意图测试 | 输出摘要: 更新 main_test.go
+- 时间: 2026-01-23 16:02:05 +0800 | 工具: shell_command (require_escalated) | 参数: go test ./... | 输出摘要: ok ai_box
+- 时间: 2026-01-23 16:02:05 +0800 | 工具: apply_patch | 参数: 更新 .codex/testing.md | 输出摘要: 追加测试输出
+- 时间: 2026-01-23 16:02:05 +0800 | 工具: apply_patch | 参数: 更新 verification.md | 输出摘要: 更新验证结论
+- 时间: 2026-01-23 16:02:05 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 16:02:05 +0800
+- 时间: 2026-01-23 16:13:38 +0800 | 工具: apply_patch | 参数: TTS 发送前兜底过滤控制标记 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 16:13:38 +0800 | 工具: apply_patch | 参数: 新增 normalizeIntentText | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 16:13:38 +0800 | 工具: apply_patch | 参数: 更新意图测试 | 输出摘要: 更新 main_test.go
+- 时间: 2026-01-23 16:13:38 +0800 | 工具: shell_command (require_escalated) | 参数: go test ./... | 输出摘要: ok ai_box
+- 时间: 2026-01-23 16:13:38 +0800 | 工具: apply_patch | 参数: 更新 .codex/testing.md | 输出摘要: 追加测试输出
+- 时间: 2026-01-23 16:13:38 +0800 | 工具: apply_patch | 参数: 更新 verification.md | 输出摘要: 更新验证结论
+- 时间: 2026-01-23 16:13:38 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 16:13:38 +0800
+- 时间: 2026-01-23 16:44:07 +0800 | 工具: mcp__sequential_thinking__sequentialthinking | 参数: thoughtNumber=1,totalThoughts=1 | 输出摘要: thoughtHistoryLength=7
+- 时间: 2026-01-23 16:44:07 +0800 | 工具: shell_command | 参数: cat ~/.codex/skills/using-superpowers/SKILL.md | 输出摘要: 读取技能文档成功
+- 时间: 2026-01-23 16:44:07 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 16:44:07 +0800
+- 时间: 2026-01-23 16:44:07 +0800 | 工具: shell_command (require_escalated) | 参数: mkdir -p /Users/zuki/Downloads/D11_APP-Cloud-wake && cp -a main.go main_test.go verification.md .codex 到 Downloads | 输出摘要: 已复制到 Downloads
+- 时间: 2026-01-23 16:44:07 +0800 | 工具: shell_command (require_escalated) | 参数: ls -l /Users/zuki/Downloads/D11_APP-Cloud-wake/... | 输出摘要: 目标文件存在
+- 时间: 2026-01-23 17:00:43 +0800 | 工具: apply_patch | 参数: 调整打断词与随机播放意图逻辑 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 17:00:43 +0800 | 工具: apply_patch | 参数: 更新随机播放意图测试 | 输出摘要: 更新 main_test.go
+- 时间: 2026-01-23 17:00:43 +0800 | 工具: shell_command (require_escalated) | 参数: go test ./... | 输出摘要: ok ai_box
+- 时间: 2026-01-23 17:00:43 +0800 | 工具: apply_patch | 参数: 更新 .codex/testing.md | 输出摘要: 追加测试输出
+- 时间: 2026-01-23 17:00:43 +0800 | 工具: apply_patch | 参数: 更新 verification.md | 输出摘要: 更新验证结论
+- 时间: 2026-01-23 17:00:43 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 17:00:43 +0800
+- 时间: 2026-01-23 17:00:43 +0800 | 工具: shell_command (require_escalated) | 参数: cp main.go main_test.go verification.md .codex 到 Downloads | 输出摘要: 已同步到 Downloads
+- 时间: 2026-01-23 17:00:43 +0800 | 工具: shell_command (require_escalated) | 参数: ls -l /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go main_test.go | 输出摘要: 目标文件已更新
+- 时间: 2026-01-23 17:07:58 +0800 | 工具: apply_patch | 参数: 新增 resetSessionForTTS 并在切歌后重置会话 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 17:07:58 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 17:07:58 +0800
+- 时间: 2026-01-23 16:25:13 +0800 | 工具: apply_patch | 参数: 增加播放与忙碌判断诊断日志 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 16:25:13 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 16:25:13 +0800
+- 时间: 2026-01-23 17:28:23 +0800 | 工具: apply_patch | 参数: 打断后丢弃 TTS 文本并静音 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 17:28:23 +0800 | 工具: shell_command (require_escalated) | 参数: go test ./... | 输出摘要: ok ai_box
+- 时间: 2026-01-23 17:28:23 +0800 | 工具: apply_patch | 参数: 更新 .codex/testing.md | 输出摘要: 追加测试输出
+- 时间: 2026-01-23 17:28:23 +0800 | 工具: apply_patch | 参数: 更新 verification.md | 输出摘要: 更新验证结论
+- 时间: 2026-01-23 17:28:23 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 17:28:23 +0800
+- 时间: 2026-01-23 17:38:29 +0800 | 工具: mcp__sequential_thinking__sequentialthinking | 参数: thoughtNumber=1,totalThoughts=1 | 输出摘要: 分析打断后仍播报的原因
+- 时间: 2026-01-23 17:38:29 +0800 | 工具: shell_command | 参数: sed/rg 查看 main.go 中断与 TTS 逻辑 | 输出摘要: 定位 ttsMuted/receiveLoop/performStop
+- 时间: 2026-01-23 17:38:29 +0800 | 工具: apply_patch | 参数: 增加 TTS 连接关闭与打断丢包逻辑 | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 17:38:29 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 17:38:29 +0800
+- 时间: 2026-01-23 17:41:39 +0800 | 工具: apply_patch | 参数: 修复打断后 TTS 仍续播（关闭连接+丢弃PCM） | 输出摘要: 更新 main.go
+- 时间: 2026-01-23 17:41:39 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 17:41:39 +0800

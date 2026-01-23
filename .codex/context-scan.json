@@ -1,0 +1,26 @@
+{
+  "date": "2026-01-23",
+  "executor": "Codex",
+  "location": [
+    "main.go:739 (callAgentStream 流式TTS与控制标记过滤)",
+    "main.go:289 (MusicManager 与 SearchAndPlay)",
+    "main.go:972 (快速切歌 quickSwitch 逻辑)"
+  ],
+  "current_state": [
+    "LLM 回复中包含 [PLAY: 歌名] 控制标记；TTS 需过滤控制指令但仍出现额外歌名播报",
+    "快速切歌使用 RANDOM 播放，但会随机到当前歌曲"
+  ],
+  "tech_stack": [
+    "Go 语言单体 main.go",
+    "DashScope LLM/TTS WebSocket",
+    "本地 aplay 播放 PCM"
+  ],
+  "tests": [
+    "go test ./...（已可运行）"
+  ],
+  "observations": [
+    "控制指令标记与播报混用，需在流式阶段抑制标记后的多余文本",
+    "随机选歌未排除当前播放曲目",
+    "code-index 工具不可用，已使用 rg/sed 进行替代检索"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "date": "2026-01-23",
+  "known": [
+    "打断逻辑位于 main.go 的 busy 分支",
+    "performStop() 仅清理当前音频与通道，不阻止后续 LLM/TTS 继续"
+  ],
+  "unknown": [
+    {
+      "question": "是否存在单独的音乐播放队列或播放状态机需要同步更新？",
+      "priority": "low"
+    },
+    {
+      "question": "是否有外部配置要求保留某些打断词的应答？",
+      "priority": "low"
+    }
+  ],
+  "decision": "无需深挖，信息充分，可进入规划与实现。"
+}
