@@ -167,6 +167,18 @@
 - 时间: 2026-01-24T01:49:00Z | 工具: shell_command | 参数: ls -la /Users/zuki/.codex/skills | 输出摘要: 扫描可用技能目录。
 - 时间: 2026-01-24T01:49:45Z | 工具: shell_command | 参数: nl -ba /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | sed -n '160,230p' | 输出摘要: 查看 controlTagFilter 定义。
 - 时间: 2026-01-24T01:49:45Z | 工具: shell_command | 参数: nl -ba /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | sed -n '880,1065p' | 输出摘要: 查看 callAgentStream 与播放确认逻辑行号。
+- 时间: 2026-01-24T02:16:23Z | 工具: apply_patch | 参数: 更新 main.go isExit/isInterrupt 使用归一化并识别 DJ | 输出摘要: 打断词匹配更稳健。
+- 时间: 2026-01-24T02:16:23Z | 工具: apply_patch | 参数: 新增 extractSongQuery 与 hasLocalSongMatch | 输出摘要: 过滤错误点歌指令。
+- 时间: 2026-01-24T02:16:23Z | 工具: apply_patch | 参数: 更新 main.go 忙碌逻辑与随机播放分支 | 输出摘要: 修正缩进与逻辑，错误指令直接忽略。
+- 时间: 2026-01-24T02:20:26Z | 工具: shell_command | 参数: nl -ba /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | sed -n '1210,1345p' | 输出摘要: 复查忙碌逻辑与意图过滤代码。
+- 时间: 2026-01-24T02:21:32Z | 工具: web.run | 参数: search_query="intent confidence threshold reject low confidence utterances voice assistant best practices" | 输出摘要: Cognigy 阈值/确认/拒识说明。
+- 时间: 2026-01-24T02:21:32Z | 工具: web.run | 参数: search_query="Amazon Lex confidence score fallback or clarification prompt for ambiguous user intent" | 输出摘要: Amazon Lex fallback/clarification 文档。
+- 时间: 2026-01-24T02:22:52Z | 工具: shell_command | 参数: rg -n "extractSongQuery|hasLocalSongMatch|func isExit|func isInterrupt" /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | 输出摘要: 获取关键函数行号。
+- 时间: 2026-01-24T03:11:18Z | 工具: shell_command | 参数: sed -n '190,215p' /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | 输出摘要: 查看 isInterrupt 中的 DJ 特判。
+- 时间: 2026-01-24T03:11:18Z | 工具: apply_patch | 参数: 移除 isInterrupt 中 DJ 映射 | 输出摘要: 避免将 DJ 误当打断指令。
+- 时间: 2026-01-24T03:37:48Z | 工具: web.run | 参数: search_query="Rasa NLU fallback classifier threshold intent confidence" | 输出摘要: 获取 Rasa FallbackClassifier 阈值与歧义阈值说明。
+- 时间: 2026-01-24T03:37:48Z | 工具: web.run | 参数: search_query="Amazon Lex confidence score threshold fallback intent classification" | 输出摘要: 获取 Lex 置信度阈值与 FallbackIntent 机制。
+- 时间: 2026-01-24T03:37:48Z | 工具: web.run | 参数: search_query="Dialogflow intent classification threshold fallback" | 输出摘要: 获取 Dialogflow 意图匹配阈值与 fallback 行为。
 - 时间: 2026-01-24T02:01:05Z | 工具: shell_command | 参数: sed -n '70,110p' /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | 输出摘要: 定位 ttsMuted 重复声明。
 - 时间: 2026-01-24T02:01:05Z | 工具: apply_patch | 参数: 删除 main.go 中重复 ttsMuted 声明 | 输出摘要: 保留单一 ttsMuted 定义。
 - 时间: 2026-01-24T01:53:32Z | 工具: web.run | 参数: search_query="error while loading shared libraries libluxaudio.so cannot open shared object file No such file or directory LD_LIBRARY_PATH ldconfig rpath" | 输出摘要: 动态库缺失排查与 LD_LIBRARY_PATH/ldconfig 解决方案来源。

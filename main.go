@@ -65,8 +65,7 @@ var INTERRUPT_WORDS = []string{
 // ================= 2.5 云端伪唤醒词库 =================
 // 注意：这里放一些常见同音/误识别变体，尽量提高“唤醒命中率”。
 var WAKE_WORDS = []string{
-	"你好小瑞", "你好小睿", "你好晓瑞",
-	"小瑞", "小睿", "晓瑞",
+	"你好小瑞", "你好小睿", "你好晓瑞", "你好小蕊",
 }
 
 // ================= 3. 并发控制与状态变量 =================
@@ -204,9 +203,6 @@ func isExit(text string) bool {
 
 func isInterrupt(text string) bool {
 	cleaned := normalizeIntentText(text)
-	if cleaned != "" && strings.EqualFold(cleaned, "DJ") {
-		return true
-	}
 	for _, w := range INTERRUPT_WORDS {
 		if strings.Contains(cleaned, w) {
 			return true
