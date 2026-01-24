@@ -142,3 +142,33 @@
 - 时间: 2026-01-23 17:38:29 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 17:38:29 +0800
 - 时间: 2026-01-23 17:41:39 +0800 | 工具: apply_patch | 参数: 修复打断后 TTS 仍续播（关闭连接+丢弃PCM） | 输出摘要: 更新 main.go
 - 时间: 2026-01-23 17:41:39 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-23 17:41:39 +0800
+- 时间: 2026-01-24 09:17:51 +0800 | 工具: shell_command | 参数: git checkout --ours . (首次失败，权限不足) | 输出摘要: index.lock 权限错误
+- 时间: 2026-01-24 09:17:51 +0800 | 工具: shell_command (require_escalated) | 参数: git checkout --ours . | 输出摘要: Updated 0 paths from the index
+- 时间: 2026-01-24 09:17:51 +0800 | 工具: shell_command | 参数: git status -sb | 输出摘要: 工作区干净
+- 时间: 2026-01-24 09:17:51 +0800 | 工具: shell_command | 参数: pwd && git rev-parse --show-toplevel | 输出摘要: /Users/zuki/Downloads/D11_APP-Cloud-wake
+- 时间: 2026-01-24 09:17:51 +0800 | 工具: shell_command | 参数: git log --oneline --decorate -5 | 输出摘要: HEAD 与 origin/main 同步
+- 时间: 2026-01-24 09:17:51 +0800 | 工具: shell_command | 参数: git status --porcelain -uall | 输出摘要: 无未跟踪或修改
+- 时间: 2026-01-24 09:17:51 +0800 | 工具: shell_command (require_escalated) | 参数: git push -u origin main | 输出摘要: Everything up-to-date
+- 时间: 2026-01-24 09:17:51 +0800 | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S %z' | 输出摘要: 2026-01-24 09:17:51 +0800
+- 时间: 2026-01-24 09:41:13 +0800 | 工具: web.run | 参数: search_query="gorilla websocket Close ReadMessage" | 输出摘要: 关键来源 pkg.go.dev/github.com/gorilla/websocket
+- 时间: 2026-01-24 09:41:13 +0800 | 工具: web.run | 参数: search_query="Go context WithCancel package documentation" | 输出摘要: 关键来源 pkg.go.dev/context
+- 时间: 2026-01-24 09:42:19 +0800 | 工具: shell_command | 参数: ls -la ~/.codex/skills | 输出摘要: 扫描可用技能
+- 时间: 2026-01-24 09:42:19 +0800 | 工具: shell_command | 参数: sed -n '1,200p' ~/.codex/skills/using-superpowers/SKILL.md | 输出摘要: 读取 using-superpowers
+- 时间: 2026-01-24 09:42:19 +0800 | 工具: shell_command | 参数: sed -n '1,200p' ~/.codex/skills/AI_BOX/SKILL.md | 输出摘要: 读取 ai_box_orchestrator
+- 时间: 2026-01-24 09:42:19 +0800 | 工具: mcp__shrimp__list_tasks | 参数: status=all | 输出摘要: 存在 3 个 pending 任务
+- 时间: 2026-01-24 09:42:19 +0800 | 工具: mcp__shrimp__execute_task | 参数: taskId=6d007f02-c9c4-42e3-b6b1-7c59e2a9292c | 输出摘要: 任务转为 in_progress
+- 时间: 2026-01-24 09:42:19 +0800 | 工具: mcp__shrimp__execute_task | 参数: taskId=5d7ee3fe-8573-427d-936c-815ac7f0c060 | 输出摘要: 任务转为 in_progress
+- 时间: 2026-01-24 09:42:19 +0800 | 工具: mcp__shrimp__verify_task | 参数: taskId=6d007f02-c9c4-42e3-b6b1-7c59e2a9292c | 输出摘要: 任务已完成
+- 时间: 2026-01-24 09:42:19 +0800 | 工具: mcp__shrimp__verify_task | 参数: taskId=5d7ee3fe-8573-427d-936c-815ac7f0c060 | 输出摘要: 任务已完成
+- 时间: 2026-01-24T01:46:36Z | 工具: shell_command | 参数: rg -n "sanitizeTtsText|sendChunk|firstChunkSent|ttsSent" /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | 输出摘要: 定位 TTS 发送与过滤相关行号。
+- 时间: 2026-01-24T01:46:36Z | 工具: shell_command | 参数: sed -n '860,1045p' /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | 输出摘要: 查看 callAgentStream 与 sendChunk 逻辑。
+- 时间: 2026-01-24T01:46:36Z | 工具: shell_command | 参数: sed -n '1045,1145p' /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | 输出摘要: 查看播放确认与意图识别相关逻辑。
+- 时间: 2026-01-24T01:46:36Z | 工具: shell_command | 参数: sed -n '150,210p' /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | 输出摘要: 查看 controlTagFilter 与打断逻辑。
+- 时间: 2026-01-24T01:49:00Z | 工具: shell_command | 参数: ls -la /Users/zuki/.codex/skills | 输出摘要: 扫描可用技能目录。
+- 时间: 2026-01-24T01:49:45Z | 工具: shell_command | 参数: nl -ba /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | sed -n '160,230p' | 输出摘要: 查看 controlTagFilter 定义。
+- 时间: 2026-01-24T01:49:45Z | 工具: shell_command | 参数: nl -ba /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | sed -n '880,1065p' | 输出摘要: 查看 callAgentStream 与播放确认逻辑行号。
+- 时间: 2026-01-24T02:01:05Z | 工具: shell_command | 参数: sed -n '70,110p' /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | 输出摘要: 定位 ttsMuted 重复声明。
+- 时间: 2026-01-24T02:01:05Z | 工具: apply_patch | 参数: 删除 main.go 中重复 ttsMuted 声明 | 输出摘要: 保留单一 ttsMuted 定义。
+- 时间: 2026-01-24T01:53:32Z | 工具: web.run | 参数: search_query="error while loading shared libraries libluxaudio.so cannot open shared object file No such file or directory LD_LIBRARY_PATH ldconfig rpath" | 输出摘要: 动态库缺失排查与 LD_LIBRARY_PATH/ldconfig 解决方案来源。
+- 时间: 2026-01-24T01:53:32Z | 工具: web.run | 参数: search_query="Linux dynamic linker cannot open shared object file set LD_LIBRARY_PATH run ldconfig how to fix" | 输出摘要: 动态链接器搜索路径与 ldd/ldconfig 使用说明来源。
+- 时间: 2026-01-24T01:50:13Z | 工具: shell_command | 参数: sed -n '1,120p' /Users/zuki/.codex/skills/using-superpowers/SKILL.md | 输出摘要: 读取 using-superpowers。
