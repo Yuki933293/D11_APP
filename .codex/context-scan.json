@@ -1,0 +1,20 @@
+{
+  "root": "/Users/zuki/Downloads/D11_APP-Cloud-wake",
+  "language": [
+    "Go",
+    "C",
+    "Shell"
+  ],
+  "entry": "main.go",
+  "config": "config_runtime.go",
+  "audio_lib": "libluxaudio.so",
+  "modules_observed": [
+    "ASR/LLM/TTS 访问 DashScope",
+    "音频采集与播放 (arecord/aplay)",
+    "伪唤醒门控",
+    "音乐管理与 Ducking",
+    "运行时配置加载"
+  ],
+  "tests": "未发现明确测试脚本",
+  "notes": "main.go 聚合了多数业务逻辑，需拆分为多文件模块。"
+}

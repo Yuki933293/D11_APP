@@ -1,0 +1,34 @@
+# operations-log.md
+
+- 时间: 2026-01-24T07:00:12Z | 工具: shell_command | 参数: rg -n "isQuickSwitch" /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | 输出摘要: 定位切歌逻辑。
+- 时间: 2026-01-24T07:00:12Z | 工具: shell_command | 参数: nl -ba /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | sed -n '930,980p' | 输出摘要: 查看切歌逻辑代码段行号。
+- 时间: 2026-01-24T08:10:55Z | 工具: shell_command | 参数: rg -n "isTtsBusy|isMusicBusy|isQuickSwitch" /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | 输出摘要: 定位切歌触发条件。
+- 时间: 2026-01-24T08:10:55Z | 工具: shell_command | 参数: sed -n '930,980p' /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | 输出摘要: 查看忙碌穿透与切歌触发代码段。
+- 时间: 2026-01-24T14:55:30-08:00 | 工具: web.run | 查询: "ALSA aplay manual blocking behavior waits until playback finished"; "aplay command man page" | 关键来源: https://manpages.org/aplay, https://www.mankier.com/1/aplay | 备注: 核对 aplay 手册信息。
+- 时间: 2026-01-24T15:05:10-08:00 | 工具: shell_command | 参数: rg -n "^func " /Users/zuki/Downloads/D11_APP-Cloud-wake/main.go | 输出摘要: 统计 main.go 内部函数以规划拆分。
+- 时间: 2026-01-24T15:23:44-08:00 | 工具: shell_command | 参数: gofmt -w main.go constants.go state.go intent.go wake.go music_manager.go audio_player.go tts.go llm.go asr.go audio_loop.go util.go control.go | 输出摘要: 格式化拆分后的 Go 文件。
+- 时间: 2026-01-24T15:26:02-08:00 | 工具: shell_command | 参数: go test ./... | 输出摘要: 失败，go-build 缓存目录权限不足（operation not permitted）。
+- 时间: 2026-01-24T15:27:11-08:00 | 工具: shell_command | 参数: GOCACHE=/tmp/go-build go test ./... | 输出摘要: 通过（无测试用例）。
+- 时间: 2026-01-24T15:31:20-08:00 | 工具: web.run | 查询: "Go package can be split across multiple files in the same directory"; "gofmt command overview" | 关键来源: https://go.dev/doc/modules/layout, https://forrestcli.com/tools/gofmt | 备注: 确认 Go 包拆分与 gofmt 说明。
+- 时间: 2026-01-24T16:02:18-08:00 | 工具: shell_command | 参数: rg -n "amixer|volume|mixer|ALSA" -g "*.go" | 输出摘要: 未发现现有音量控制实现。
+- 时间: 2026-01-24T16:05:44-08:00 | 工具: shell_command | 参数: gofmt -w volume_control.go | 输出摘要: 新增音量模块文件并格式化。
+- 时间: 2026-01-24T16:06:02-08:00 | 工具: shell_command | 参数: GOCACHE=/tmp/go-build go test ./... | 输出摘要: 通过（无测试用例）。
+- 时间: 2026-01-24T16:12:30-08:00 | 工具: web.run | 查询: "amixer sset Master 50% usage"; "ALSA amixer command reference sset" | 关键来源: https://manpages.debian.org/testing/alsa-utils/amixer.1.en.html, https://man.uex.se/1/amixer | 备注: 核对 amixer 用法与 sset 参数。
+- 时间: 2026-01-24T16:20:18-08:00 | 工具: web.run | 查询: "ALSA amixer scontrols sget sset control name meaning"; "amixer -c card select usage"; "asound.conf default device aplay" | 关键来源: https://alsa.opensrc.org/Amixer, https://manpages.debian.org/jessie/alsa-utils/amixer.1.en.html, https://alsa.opensrc.org/Asoundrc | 备注: 核对 amixer 控件与选择声卡的说明。
+- 时间: 2026-01-24T16:35:44-08:00 | 工具: shell_command | 参数: gofmt -w volume_control.go volume_intent.go asr.go | 输出摘要: 格式化新增音量语音处理代码。
+- 时间: 2026-01-24T16:36:20-08:00 | 工具: shell_command | 参数: GOCACHE=/tmp/go-build go test ./... | 输出摘要: 通过（无测试用例）。
+- 时间: 2026-01-24T16:40:18-08:00 | 工具: web.run | 查询: "amixer sset percent syntax 40% relative increase 5%+ documentation"; "amixer -c card option usage sget sset" | 关键来源: https://manpages.opensuse.org/Leap-15.6/alsa-utils/amixer.1.en.html, https://manpages.debian.org/bookworm/alsa-utils/amixer.1.en.html, https://alsa.opensrc.org/Amixer | 备注: 核对 sset 百分比与增减用法及 -c 选项。
+- 时间: 2026-01-24T16:55:12-08:00 | 工具: shell_command | 参数: gofmt -w volume_intent.go | 输出摘要: 补充音量口令后格式化文件。
+- 时间: 2026-01-24T16:55:46-08:00 | 工具: shell_command | 参数: GOCACHE=/tmp/go-build go test ./... | 输出摘要: 通过（无测试用例）。
+- 时间: 2026-01-24T17:05:10-08:00 | 工具: web.run | 查询: "amixer sset percentage relative +5% syntax"; "amixer -c card option usage sget sset" | 关键来源: https://alsa.opensrc.org/Amixer, https://manpages.debian.org/jessie/alsa-utils/amixer.1.en.html | 备注: 核对 amixer 用法与 -c 选项。
+- 时间: 2026-01-24T17:22:40-08:00 | 工具: shell_command | 参数: gofmt -w volume_control.go | 输出摘要: 修正音量反向映射后格式化文件。
+- 时间: 2026-01-24T17:23:06-08:00 | 工具: shell_command | 参数: GOCACHE=/tmp/go-build go test ./... | 输出摘要: 通过（无测试用例）。
+- 时间: 2026-01-24T17:35:10-08:00 | 工具: shell_command | 参数: gofmt -w volume_control.go | 输出摘要: 修正控件名后格式化文件。
+- 时间: 2026-01-24T17:35:38-08:00 | 工具: shell_command | 参数: GOCACHE=/tmp/go-build go test ./... | 输出摘要: 通过（无测试用例）。
+- 时间: 2026-01-24T18:02:14-08:00 | 工具: shell_command | 参数: gofmt -w volume_intent.go volume_control.go | 输出摘要: 扩展音量口令与相对百分比后格式化文件。
+- 时间: 2026-01-24T18:02:46-08:00 | 工具: shell_command | 参数: GOCACHE=/tmp/go-build go test ./... | 输出摘要: 通过（无测试用例）。
+- 时间: 2026-01-24T18:18:20-08:00 | 工具: shell_command | 参数: gofmt -w volume_intent.go | 输出摘要: 新增中文数字解析后格式化文件。
+- 时间: 2026-01-24T18:18:44-08:00 | 工具: shell_command | 参数: GOCACHE=/tmp/go-build go test ./... | 输出摘要: 通过（无测试用例）。
+- 时间: 2026-01-24T18:32:10-08:00 | 工具: shell_command | 参数: gofmt -w volume_intent.go | 输出摘要: 补充“减小”口令后格式化文件。
+- 时间: 2026-01-24T18:32:36-08:00 | 工具: shell_command | 参数: GOCACHE=/tmp/go-build go test ./... | 输出摘要: 通过（无测试用例）。
+- 时间: 2026-01-24T15:40:10-08:00 | 工具: web.run | 查询: "Go 1.23 release notes"; "golang Docker image tags" | 关键来源: https://go.dev/blog/go1.23, https://tip.golang.org/doc/go1.23, https://hub.docker.com/_/golang/ | 备注: 核对 Go 1.23 与 golang 官方镜像说明。

@@ -1,0 +1,11 @@
+{
+  "question_id": 1,
+  "topic": "模块拆分边界与目录约定",
+  "open_questions": [
+    "是否希望按功能模块拆分到多个文件但仍保持在项目根目录，还是允许新建子目录（如 internal/ 或 pkg/）？",
+    "拆分后是否需要进一步形成可复用的包（例如 music、tts、asr），还是仅做同 package main 的文件拆分？"
+  ],
+  "assumptions_for_now": [
+    "暂不新建子目录，先在同 package main 下拆分文件，保证最小改动与编译无风险。"
+  ]
+}
