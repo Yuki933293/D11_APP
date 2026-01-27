@@ -184,3 +184,19 @@
 - 时间: 2026-01-24T01:53:32Z | 工具: web.run | 参数: search_query="error while loading shared libraries libluxaudio.so cannot open shared object file No such file or directory LD_LIBRARY_PATH ldconfig rpath" | 输出摘要: 动态库缺失排查与 LD_LIBRARY_PATH/ldconfig 解决方案来源。
 - 时间: 2026-01-24T01:53:32Z | 工具: web.run | 参数: search_query="Linux dynamic linker cannot open shared object file set LD_LIBRARY_PATH run ldconfig how to fix" | 输出摘要: 动态链接器搜索路径与 ldd/ldconfig 使用说明来源。
 - 时间: 2026-01-24T01:50:13Z | 工具: shell_command | 参数: sed -n '1,120p' /Users/zuki/.codex/skills/using-superpowers/SKILL.md | 输出摘要: 读取 using-superpowers。
+- 时间: 2026-01-27T09:50:30Z | 工具: apply_patch | 参数: 移除 EnergyVAD 并强制 WebRTC VAD（py_ai_box/vad.py） | 输出摘要: 仅保留 WebRTC VAD，缺失库则报错。
+- 时间: 2026-01-27T09:50:30Z | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S' | 输出摘要: 2026-01-27 09:50:30
+- 时间: 2026-01-27T09:54:50Z | 工具: apply_patch | 参数: install_py.sh 生成 Python 专用 ai_box.env | 输出摘要: 增加缺失时自动生成并提示填写 Key。
+- 时间: 2026-01-27T09:54:50Z | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S' | 输出摘要: 2026-01-27 09:54:50
+- 时间: 2026-01-27T10:06:25Z | 工具: apply_patch | 参数: 删除 Go 源码与 Go 模块文件（*.go, go.mod/go.sum, go-webrtc-vad Go 文件） | 输出摘要: 移除 Go 逻辑。
+- 时间: 2026-01-27T10:06:25Z | 工具: shell_command | 参数: rm -rf aec vad libs/go-webrtc-vad/example .gocache ai_box | 输出摘要: 删除 Go 相关目录与构建产物。
+- 时间: 2026-01-27T10:06:25Z | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S' | 输出摘要: 2026-01-27 10:06:25
+- 时间: 2026-01-27T10:07:29Z | 工具: apply_patch | 参数: 删除 Go 版安装脚本 deploy/install.sh | 输出摘要: 移除 Go 部署逻辑。
+- 时间: 2026-01-27T10:07:29Z | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S' | 输出摘要: 2026-01-27 10:07:29
+- 时间: 2026-01-27T10:10:29Z | 工具: apply_patch | 参数: 清理 readme 中 Go 相关说明并更新 Python 部署步骤 | 输出摘要: README 仅保留 Python 流程。
+- 时间: 2026-01-27T10:10:29Z | 工具: shell_command | 参数: rg -n "\\bgo\\b|golang|go build|install.sh|run.sh|ai_box\\b" readme.md | 输出摘要: 复查 README 残留。
+- 时间: 2026-01-27T10:10:29Z | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S' | 输出摘要: 2026-01-27 10:10:29
+- 时间: 2026-01-27T10:15:11Z | 工具: apply_patch | 参数: install_py.sh 增加非 Linux 环境仅生成 env 的分支 | 输出摘要: macOS 上不再尝试创建 /userdata。
+- 时间: 2026-01-27T10:15:11Z | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S' | 输出摘要: 2026-01-27 10:15:11
+- 时间: 2026-01-27T10:21:12Z | 工具: apply_patch | 参数: 重建 deploy/install_py.sh 完整脚本（修复 EOF 语法错误） | 输出摘要: 恢复可执行脚本内容。
+- 时间: 2026-01-27T10:21:12Z | 工具: shell_command | 参数: date '+%Y-%m-%d %H:%M:%S' | 输出摘要: 2026-01-27 10:21:12
